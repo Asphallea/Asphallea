@@ -25,6 +25,27 @@ jobs:
       - run: pip install ".[dev]"
       - run: pytest -q
 
+  core-build:
+    # The launcher must compile on every OS: the real enforcement on Linux, and
+    # the honest "containment unavailable" stub on macOS and Windows. The Linux
+    # crates are target-gated, so this proves the cross-platform story holds.
+    name: core build (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build --release --manifest-path core/Cargo.toml
+      - name: probe reports honestly
+        shell: bash
+        run: |
+          out=$(core/target/release/asphallea-run --probe)
+          echo "$out"
+          echo "$out" | grep -q '"platform"'
+
   rust-quality:
     # The core must stay formatted and lint-clean. clippy runs against the Linux
     # target because the enforcement code is Linux-gated.
