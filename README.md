@@ -40,9 +40,9 @@ Linux, macOS, and Windows. This alone is useful.
 code, or run shell commands, Asphallea contains them at the OS level using each
 platform's own engine. Linux gets a Landlock filesystem allowlist, seccomp-bpf
 syscall and network filtering, resource limits, and network-namespace isolation.
-Windows gets a Job Object that bounds memory, CPU, and process count and guarantees
-the whole process tree is killed. This is the part a pure-ML competitor cannot
-replicate.
+Windows gets an AppContainer filesystem allowlist and network deny inside a Job
+Object that bounds memory, CPU, and process count and guarantees the whole process
+tree is killed. This is the part a pure-ML competitor cannot replicate.
 
 ## Install
 
@@ -221,28 +221,30 @@ partially contained.
 | --- | --- | --- | --- |
 | Policy tier: allow/deny, allowlists, rate, spend, timeout | yes | yes | yes |
 | Audit trail (JSONL) | yes | yes | yes |
-| Filesystem allowlist at the OS level | yes (Landlock) | planned (AppContainer) | planned (Seatbelt) |
-| Network deny at the OS level | yes (seccomp + netns) | planned (AppContainer) | planned (Seatbelt) |
+| Filesystem allowlist at the OS level | yes (Landlock) | yes (AppContainer) | planned (Seatbelt) |
+| Network deny at the OS level | yes (seccomp + netns) | yes (AppContainer) | planned (Seatbelt) |
 | Syscall filtering | yes (seccomp-bpf) | n/a | planned (Seatbelt) |
 | Resource limits (memory, CPU, processes) | yes (setrlimit) | yes (Job Objects) | planned |
 | Guaranteed process-tree termination | yes | yes (Job Objects) | planned |
-| Containment engine | Landlock + seccomp | Job Objects | none yet |
+| Containment engine | Landlock + seccomp | AppContainer + Job Objects | none yet |
 
 The policy tier enforces the tool allowlist, path allowlist, rate limits, spend
 caps, and timeouts identically on all three. The containment tier is where the OS
 matters:
 
-- **Linux** contains fully: filesystem allowlist, network deny, syscall filter, and
-  resource limits, applied to the process and everything it spawns.
-- **Windows** contains resources and guarantees the whole process tree is killed
-  (Job Objects). Filesystem and network allowlisting for arbitrary subprocesses is
-  the next backend (AppContainer). A policy that requires filesystem or network
-  containment fails closed on Windows today rather than run exposed.
-- **macOS** has no containment engine yet (Seatbelt is planned), so it fails closed.
+- **Linux** contains with Landlock (filesystem allowlist), seccomp (syscall and
+  network filter), network namespaces, and setrlimit, applied to the process and
+  everything it spawns.
+- **Windows** contains with an AppContainer (filesystem allowlist and network deny)
+  inside a Job Object (memory, CPU, and process-count limits, and guaranteed
+  termination of the whole process tree). A hijacked shell command cannot read the
+  user's files, write outside the workspace, or reach the network.
+- **macOS** has no containment engine yet (Seatbelt is planned). It fails closed:
+  the dangerous command does not run, and the refusal names what is missing.
 
-Failing closed means the dangerous command does not run. The harm is prevented; what
-is missing is the ability to run that specific command while allowlisting its
-filesystem, which the planned backends add.
+Coverage is reported per dimension. A run proceeds contained only when the backend
+covers every dimension the policy requires; otherwise it fails closed rather than
+run partially contained.
 
 ## Architecture
 

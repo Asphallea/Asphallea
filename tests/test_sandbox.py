@@ -197,22 +197,45 @@ def test_windows_resource_policy_runs_contained():
     assert result.contained is True
     assert result.returncode == 0
     assert "win-contained" in result.stdout
-    assert result.controls.get("backend") == "windows-job-object"
+    assert result.controls.get("backend") == "windows-appcontainer-job"
 
 
 @windows_contained
-def test_windows_filesystem_policy_fails_closed(tmp_path):
-    # The Job Object backend does not do filesystem allowlisting yet, so a policy
-    # that requires it must fail closed, not run partially contained.
+def test_windows_contained_allows_workspace_read(tmp_path):
     policy = base_policy(tmp_path)
-    with pytest.raises(ContainmentUnavailable) as exc:
-        sandbox.run([sys.executable, "-c", "print('x')"], policy=policy, tool="run_shell")
-    assert "filesystem" in exc.value.decision.reason.lower()
+    ws_file = str(tmp_path / "ws" / "notes.txt")
+    with open(ws_file, "w") as fh:
+        fh.write("PUBLIC-workspace")
+    result = sandbox.run(["cmd", "/c", "type", ws_file], policy=policy, tool="run_shell")
+    assert result.contained is True
+    assert "PUBLIC-workspace" in result.stdout
+
+
+@windows_contained
+def test_windows_contained_blocks_read_outside(tmp_path):
+    policy = base_policy(tmp_path)
+    secret = str(tmp_path / "secret.txt")
+    with open(secret, "w") as fh:
+        fh.write("TOPSECRET-win")
+    result = sandbox.run(["cmd", "/c", "type", secret], policy=policy, tool="run_shell")
+    assert result.contained is True
+    assert result.returncode != 0
+    assert "TOPSECRET-win" not in result.stdout
+
+
+@windows_contained
+def test_windows_contained_blocks_write_outside(tmp_path):
+    policy = base_policy(tmp_path)
+    target = str(tmp_path / "escape.txt")
+    sandbox.run(["cmd", "/c", f"echo pwned > {target}"], policy=policy, tool="run_shell")
+    assert not os.path.exists(target)
 
 
 @windows_contained
 def test_windows_probe_reports_backend():
     caps = capabilities(refresh=True)
-    assert caps.backend == "windows-job-object"
+    assert caps.backend == "windows-appcontainer-job"
+    assert caps.filesystem_sandbox is True
+    assert caps.network_sandbox is True
     assert caps.resource_limits is True
     assert caps.process_kill is True
