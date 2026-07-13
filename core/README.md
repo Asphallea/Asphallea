@@ -19,6 +19,16 @@ launched it is never restricted.
   count, open descriptors.
 - **Network namespace** isolation, best effort, on top of the syscall block.
 
+## What it enforces (Windows)
+
+- **Filesystem allowlist and network deny** with an AppContainer. The command runs
+  in a low-privilege sandbox that can only reach the policy's allowlisted paths and
+  the system directories, and has no network capability. A grant to the container
+  SID is added to each allowed path and revoked when the run ends.
+- **Resource limits and guaranteed termination** with a Job Object: memory,
+  CPU-time, and process-count limits, and `KILL_ON_JOB_CLOSE` so the whole process
+  tree dies with the launcher.
+
 ## Build
 
 ```sh
