@@ -1,0 +1,52 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  policy-tier:
+    # The policy tier is cross-platform pure Python. It must pass identically on
+    # all three operating systems. The containment tests self-skip here because
+    # no core binary is present.
+    name: policy tier (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: python -m pip install --upgrade pip
+      - run: pip install ".[dev]"
+      - run: pytest -q
+
+  containment-tier:
+    # Linux only. This builds the Rust core (compile-checking it) and runs the
+    # suite with the core binary available, so the real OS containment tests
+    # execute: blocked reads and writes outside the allowlist, and the capability
+    # probe. This is the proof the containment tier holds.
+    name: containment tier (linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: dtolnay/rust-toolchain@stable
+      - name: build the core
+        run: cargo build --release --manifest-path core/Cargo.toml
+      - name: install the SDK
+        run: pip install ".[dev]"
+      - name: run tests with OS containment
+        env:
+          ASPHALLEA_CORE_BIN: ${{ github.workspace }}/core/target/release/asphallea-run
+        run: pytest -q
+      - name: run the injection demo
+        env:
+          ASPHALLEA_CORE_BIN: ${{ github.workspace }}/core/target/release/asphallea-run
+        run: python examples/injection_demo.py
