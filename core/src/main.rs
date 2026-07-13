@@ -38,6 +38,8 @@ mod rlimits;
 mod seccomp;
 
 #[cfg(target_os = "windows")]
+mod win_appcontainer;
+#[cfg(target_os = "windows")]
 mod win_contain;
 
 /// A parsed command invocation, shared by the OS backends.
@@ -269,7 +271,7 @@ fn main() {
 
     let mut report = Report {
         platform: "windows".to_string(),
-        backend: "windows-job-object".to_string(),
+        backend: "windows-appcontainer-job".to_string(),
         policy: policy.name.clone(),
         ..Default::default()
     };
@@ -280,10 +282,12 @@ fn main() {
 
 #[cfg(target_os = "windows")]
 fn print_probe_windows() {
+    // AppContainer (filesystem + network) is available on Windows 8+, which is
+    // every supported Windows. Job Objects give resources and termination.
     println!(
-        "{{\"version\":\"{}\",\"platform\":\"windows\",\"backend\":\"windows-job-object\",\
-         \"resource_limits\":true,\"process_kill\":true,\"filesystem_sandbox\":false,\
-         \"network_sandbox\":false}}",
+        "{{\"version\":\"{}\",\"platform\":\"windows\",\"backend\":\"windows-appcontainer-job\",\
+         \"resource_limits\":true,\"process_kill\":true,\"filesystem_sandbox\":true,\
+         \"network_sandbox\":true}}",
         env!("CARGO_PKG_VERSION")
     );
 }

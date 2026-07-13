@@ -1,26 +1,18 @@
-//! Windows containment via Job Objects.
+//! Windows containment: Job Object resource limits and guaranteed termination,
+//! plus AppContainer filesystem and network allowlisting.
 //!
-//! A Job Object is the Windows primitive for bounding and killing a group of
-//! processes. The launcher creates a job, spawns the target into it while the
-//! target is still suspended (so no code runs before the limits are in force),
-//! then resumes it. Everything the target spawns is inside the job too.
-//!
-//! What this backend enforces today:
-//!
-//! - Guaranteed termination. `KILL_ON_JOB_CLOSE` means if the launcher dies (for
-//!   example the SDK kills it on a wall-clock timeout), the kernel kills the
-//!   target and every descendant. There is no orphan and no escape.
-//! - Memory limit (per process and per job).
-//! - CPU-time limit (the process is killed when it exceeds it).
-//! - Process-count limit.
-//!
-//! What it does not do yet: filesystem and network allowlisting. That is the
-//! AppContainer layer, and it is the next backend. Until then this backend is
-//! honest about it in the report, and the policy tier still enforces path
-//! allowlists for wrapped callable tools.
+//! The launcher creates a Job Object (memory, CPU-time, and process-count limits,
+//! and `KILL_ON_JOB_CLOSE` so the whole tree dies with the launcher). When the
+//! policy asks for filesystem or network containment, it also launches the command
+//! inside an AppContainer (see [`crate::win_appcontainer`]) whose only reachable
+//! files are the policy's allowlisted paths and the system directories, and which
+//! has no network capability. The command is spawned suspended, placed in the job,
+//! and only then resumed, so no code runs before the limits are in force.
 
 use crate::policy::Policy;
 use crate::report::Report;
+use crate::win_appcontainer::AppContainer;
+use std::ffi::c_void;
 
 use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, HANDLE, TRUE};
 use windows_sys::Win32::System::Console::{
@@ -34,25 +26,50 @@ use windows_sys::Win32::System::JobObjects::{
     JOB_OBJECT_LIMIT_PROCESS_TIME,
 };
 use windows_sys::Win32::System::Threading::{
-    CreateProcessW, GetExitCodeProcess, ResumeThread, TerminateProcess, WaitForSingleObject,
-    CREATE_NEW_PROCESS_GROUP, CREATE_SUSPENDED, INFINITE, PROCESS_INFORMATION,
-    STARTF_USESTDHANDLES, STARTUPINFOW,
+    CreateProcessW, DeleteProcThreadAttributeList, GetExitCodeProcess,
+    InitializeProcThreadAttributeList, ResumeThread, TerminateProcess, UpdateProcThreadAttribute,
+    WaitForSingleObject, CREATE_NEW_PROCESS_GROUP, CREATE_SUSPENDED, EXTENDED_STARTUPINFO_PRESENT,
+    INFINITE, PROCESS_INFORMATION, PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES,
+    STARTF_USESTDHANDLES, STARTUPINFOEXW, STARTUPINFOW,
 };
 
-/// Run `command` inside a Job Object shaped by `policy`. Fills `report`, writes it
-/// to `report_path` before waiting, then returns the child's exit code.
+/// Run `command` under Windows containment. Fills `report`, writes it before
+/// waiting, then returns the child's exit code.
 pub fn run(
     policy: &Policy,
     command: &[String],
     report: &mut Report,
     report_path: &Option<String>,
 ) -> i32 {
-    match spawn_in_job(policy, command, report) {
+    let needs_appcontainer = !policy.filesystem.read.is_empty()
+        || !policy.filesystem.write.is_empty()
+        || policy.network_denied();
+
+    let appcontainer = if needs_appcontainer {
+        match AppContainer::new(policy, report) {
+            Ok(ac) => Some(ac),
+            Err(e) => {
+                // The policy needs filesystem or network containment and we cannot
+                // build the sandbox. Fail closed rather than run exposed.
+                report.contained = false;
+                report
+                    .warnings
+                    .push(format!("AppContainer setup failed: {e}"));
+                write_report(report_path, report);
+                eprintln!(
+                    "asphallea-run: AppContainer setup failed ({e}); refusing to run uncontained."
+                );
+                return 3;
+            }
+        }
+    } else {
+        None
+    };
+
+    match spawn(policy, command, report, appcontainer.as_ref()) {
         Ok((job, process)) => {
             report.contained = true;
             write_report(report_path, report);
-            // Wait for the child. The SDK enforces the wall-clock timeout by
-            // killing this launcher, and KILL_ON_JOB_CLOSE then kills the tree.
             let code = unsafe {
                 WaitForSingleObject(process, INFINITE);
                 let mut code: u32 = 0;
@@ -61,6 +78,7 @@ pub fn run(
                 CloseHandle(job);
                 code
             };
+            // appcontainer drops here, after the child has exited, revoking its ACEs.
             code as i32
         }
         Err(e) => {
@@ -73,91 +91,129 @@ pub fn run(
     }
 }
 
-fn spawn_in_job(
+fn spawn(
     policy: &Policy,
     command: &[String],
     report: &mut Report,
+    appcontainer: Option<&AppContainer>,
 ) -> Result<(HANDLE, HANDLE), String> {
     unsafe {
         let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
         if job.is_null() {
             return Err(format!("CreateJobObject failed (error {})", GetLastError()));
         }
+        configure_job(job, policy, report)?;
 
-        let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
-        // Always: kill the whole tree when the job handle closes, and take down a
-        // process that faults rather than popping an error dialog.
-        let mut flags =
-            JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION;
-        report.rlimits.push("kill_on_close=true".to_string());
-
-        if let Some(n) = policy.limits.max_processes {
-            info.BasicLimitInformation.ActiveProcessLimit = n as u32;
-            flags |= JOB_OBJECT_LIMIT_ACTIVE_PROCESS;
-            report.rlimits.push(format!("active_process_limit={n}"));
-        }
-        if let Some(bytes) = policy.limits.memory_bytes {
-            info.ProcessMemoryLimit = bytes as usize;
-            info.JobMemoryLimit = bytes as usize;
-            flags |= JOB_OBJECT_LIMIT_PROCESS_MEMORY | JOB_OBJECT_LIMIT_JOB_MEMORY;
-            report.rlimits.push(format!("memory_limit_bytes={bytes}"));
-        }
-        if let Some(secs) = policy.limits.cpu_seconds {
-            // PerProcessUserTimeLimit is in 100-nanosecond units.
-            info.BasicLimitInformation.PerProcessUserTimeLimit = (secs as i64) * 10_000_000;
-            flags |= JOB_OBJECT_LIMIT_PROCESS_TIME;
-            report
-                .rlimits
-                .push(format!("cpu_time_limit_seconds={secs}"));
-        }
-        info.BasicLimitInformation.LimitFlags = flags;
-
-        let set = SetInformationJobObject(
-            job,
-            JobObjectExtendedLimitInformation,
-            &info as *const _ as *const core::ffi::c_void,
-            std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
-        );
-        if set == 0 {
-            let e = GetLastError();
-            CloseHandle(job);
-            return Err(format!("SetInformationJobObject failed (error {e})"));
-        }
-
-        // Build the command line and spawn suspended so nothing runs before the
-        // process is inside the job.
         let mut cmdline: Vec<u16> = build_command_line(command)
             .encode_utf16()
             .chain(std::iter::once(0))
             .collect();
 
-        let mut si: STARTUPINFOW = std::mem::zeroed();
-        si.cb = std::mem::size_of::<STARTUPINFOW>() as u32;
-        si.dwFlags = STARTF_USESTDHANDLES;
-        si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
-        si.hStdOutput = GetStdHandle(STD_OUTPUT_HANDLE);
-        si.hStdError = GetStdHandle(STD_ERROR_HANDLE);
+        let (in_h, out_h, err_h) = (
+            GetStdHandle(STD_INPUT_HANDLE),
+            GetStdHandle(STD_OUTPUT_HANDLE),
+            GetStdHandle(STD_ERROR_HANDLE),
+        );
 
         let mut pi: PROCESS_INFORMATION = std::mem::zeroed();
-        let created = CreateProcessW(
-            std::ptr::null(),
-            cmdline.as_mut_ptr(),
-            std::ptr::null(),
-            std::ptr::null(),
-            TRUE, // inherit handles so the child shares our stdio pipes
-            CREATE_SUSPENDED | CREATE_NEW_PROCESS_GROUP,
-            std::ptr::null(),
-            std::ptr::null(),
-            &si,
-            &mut pi,
-        );
+        let mut flags = CREATE_SUSPENDED | CREATE_NEW_PROCESS_GROUP;
+
+        // Attribute-list storage must outlive CreateProcessW.
+        let mut attr_buf: Vec<u8> = Vec::new();
+        let mut sec_caps;
+
+        let created = if let Some(ac) = appcontainer {
+            // The contained process needs to write to the inherited stdio pipes.
+            ac.grant_handle_to_packages(out_h);
+            ac.grant_handle_to_packages(err_h);
+            ac.grant_handle_to_packages(in_h);
+
+            let mut size: usize = 0;
+            InitializeProcThreadAttributeList(std::ptr::null_mut(), 1, 0, &mut size);
+            attr_buf = vec![0u8; size];
+            let attr_list = attr_buf.as_mut_ptr() as *mut c_void;
+            if InitializeProcThreadAttributeList(attr_list, 1, 0, &mut size) == 0 {
+                let e = GetLastError();
+                CloseHandle(job);
+                return Err(format!(
+                    "InitializeProcThreadAttributeList failed (error {e})"
+                ));
+            }
+            sec_caps = ac.security_capabilities();
+            if UpdateProcThreadAttribute(
+                attr_list,
+                0,
+                PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES as usize,
+                &mut sec_caps as *mut _ as *mut c_void,
+                std::mem::size_of_val(&sec_caps),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            ) == 0
+            {
+                let e = GetLastError();
+                DeleteProcThreadAttributeList(attr_list);
+                CloseHandle(job);
+                return Err(format!("UpdateProcThreadAttribute failed (error {e})"));
+            }
+
+            let mut siex: STARTUPINFOEXW = std::mem::zeroed();
+            siex.StartupInfo.cb = std::mem::size_of::<STARTUPINFOEXW>() as u32;
+            siex.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+            siex.StartupInfo.hStdInput = in_h;
+            siex.StartupInfo.hStdOutput = out_h;
+            siex.StartupInfo.hStdError = err_h;
+            siex.lpAttributeList = attr_list;
+            flags |= EXTENDED_STARTUPINFO_PRESENT;
+
+            report.network = if policy.network_denied() {
+                "denied (AppContainer has no network capability)".to_string()
+            } else {
+                "allowed".to_string()
+            };
+            report.landlock_status = "appcontainer".to_string(); // filesystem allowlist in force
+
+            let created = CreateProcessW(
+                std::ptr::null(),
+                cmdline.as_mut_ptr(),
+                std::ptr::null(),
+                std::ptr::null(),
+                TRUE,
+                flags,
+                std::ptr::null(),
+                std::ptr::null(),
+                &siex as *const _ as *const STARTUPINFOW,
+                &mut pi,
+            );
+            DeleteProcThreadAttributeList(attr_list);
+            created
+        } else {
+            let mut si: STARTUPINFOW = std::mem::zeroed();
+            si.cb = std::mem::size_of::<STARTUPINFOW>() as u32;
+            si.dwFlags = STARTF_USESTDHANDLES;
+            si.hStdInput = in_h;
+            si.hStdOutput = out_h;
+            si.hStdError = err_h;
+            report.network = "not restricted (resource-only policy)".to_string();
+
+            CreateProcessW(
+                std::ptr::null(),
+                cmdline.as_mut_ptr(),
+                std::ptr::null(),
+                std::ptr::null(),
+                TRUE,
+                flags,
+                std::ptr::null(),
+                std::ptr::null(),
+                &si,
+                &mut pi,
+            )
+        };
+        let _ = &attr_buf; // keep alive until here
+
         if created == 0 {
             let e = GetLastError();
             CloseHandle(job);
-            return Err(format!(
-                "CreateProcess failed for {:?} (error {e})",
-                command
-            ));
+            return Err(format!("CreateProcess failed for {command:?} (error {e})"));
         }
 
         if AssignProcessToJobObject(job, pi.hProcess) == 0 {
@@ -169,18 +225,50 @@ fn spawn_in_job(
             return Err(format!("AssignProcessToJobObject failed (error {e})"));
         }
 
-        // The process is now bound by the job. Let it run.
         ResumeThread(pi.hThread);
         CloseHandle(pi.hThread);
-
-        report.network =
-            "not restricted (AppContainer network isolation is the next layer)".to_string();
-        report
-            .warnings
-            .push("filesystem is not allowlisted by the Job Object backend yet (AppContainer is next); the policy tier still enforces path allowlists for wrapped callable tools".to_string());
-
         Ok((job, pi.hProcess))
     }
+}
+
+unsafe fn configure_job(job: HANDLE, policy: &Policy, report: &mut Report) -> Result<(), String> {
+    let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+    let mut flags =
+        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION;
+    report.rlimits.push("kill_on_close=true".to_string());
+
+    if let Some(n) = policy.limits.max_processes {
+        info.BasicLimitInformation.ActiveProcessLimit = n as u32;
+        flags |= JOB_OBJECT_LIMIT_ACTIVE_PROCESS;
+        report.rlimits.push(format!("active_process_limit={n}"));
+    }
+    if let Some(bytes) = policy.limits.memory_bytes {
+        info.ProcessMemoryLimit = bytes as usize;
+        info.JobMemoryLimit = bytes as usize;
+        flags |= JOB_OBJECT_LIMIT_PROCESS_MEMORY | JOB_OBJECT_LIMIT_JOB_MEMORY;
+        report.rlimits.push(format!("memory_limit_bytes={bytes}"));
+    }
+    if let Some(secs) = policy.limits.cpu_seconds {
+        info.BasicLimitInformation.PerProcessUserTimeLimit = (secs as i64) * 10_000_000;
+        flags |= JOB_OBJECT_LIMIT_PROCESS_TIME;
+        report
+            .rlimits
+            .push(format!("cpu_time_limit_seconds={secs}"));
+    }
+    info.BasicLimitInformation.LimitFlags = flags;
+
+    let set = SetInformationJobObject(
+        job,
+        JobObjectExtendedLimitInformation,
+        &info as *const _ as *const c_void,
+        std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+    );
+    if set == 0 {
+        let e = GetLastError();
+        CloseHandle(job);
+        return Err(format!("SetInformationJobObject failed (error {e})"));
+    }
+    Ok(())
 }
 
 fn write_report(report_path: &Option<String>, report: &Report) {
@@ -221,12 +309,10 @@ fn append_quoted(arg: &str, out: &mut String) {
             i += 1;
         }
         if i == chars.len() {
-            // Trailing backslashes precede the closing quote: double them.
             for _ in 0..backslashes * 2 {
                 out.push('\\');
             }
         } else if chars[i] == '"' {
-            // Backslashes before a quote are doubled, then the quote is escaped.
             for _ in 0..backslashes * 2 + 1 {
                 out.push('\\');
             }
