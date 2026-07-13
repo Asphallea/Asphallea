@@ -1,51 +1,60 @@
 //! asphallea-run: the OS containment launcher.
 //!
-//! This binary is invoked by the Asphallea Python SDK for high-blast-radius tools
-//! (shells, code execution, spawned processes). It applies containment to itself
-//! and then execs the target command, so the restrictions are inherited by the
-//! command and everything it spawns, while the agent that launched it is never
-//! affected.
+//! Invoked by the Asphallea Python SDK for high-blast-radius tools (shells, code
+//! execution, spawned processes). It applies containment and then runs the target
+//! command, so the restrictions cover the command and everything it spawns, while
+//! the agent that launched it is never affected.
 //!
-//! Order matters: no_new_privs, then resource limits, then the network namespace,
-//! then the Landlock filesystem allowlist, then the seccomp syscall filter, then
-//! exec. Landlock is applied before seccomp so the filter never blocks the calls
-//! Landlock needs, and the filter leaves `execve` allowed.
+//! Each OS uses its own containment engine:
+//!
+//! - Linux: Landlock filesystem allowlist, seccomp-bpf syscall and network filter,
+//!   resource limits, network namespace. The launcher applies these to itself and
+//!   execs the command, which inherits them.
+//! - Windows: a Job Object that bounds memory, CPU time, and process count, and
+//!   guarantees the whole process tree is killed on close. Filesystem and network
+//!   allowlisting (AppContainer) are the next layer.
+//! - Other (macOS today): no engine yet, reported honestly.
 //!
 //! Usage:
 //!   asphallea-run --policy <file.json> [--report <file.json>] [--strict] -- CMD [ARGS...]
-//!   asphallea-run --probe        # print kernel capability JSON and exit
-//!
-//! Exit codes: 2 usage error, 3 containment unavailable under --strict, 127 exec
-//! failure. On success the process image is replaced by CMD, so this binary does
-//! not return.
+//!   asphallea-run --probe        # print kernel/OS capability JSON and exit
+
+// Some policy and report fields are read only by a subset of the OS backends.
+// They are part of the wire format, so allow dead_code across platforms.
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+#[allow(dead_code)]
+mod policy;
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+#[allow(dead_code)]
+mod report;
 
 #[cfg(target_os = "linux")]
 mod landlock_fs;
 #[cfg(target_os = "linux")]
 mod netns;
 #[cfg(target_os = "linux")]
-mod policy;
-#[cfg(target_os = "linux")]
-mod report;
-#[cfg(target_os = "linux")]
 mod rlimits;
 #[cfg(target_os = "linux")]
 mod seccomp;
 
-#[cfg(target_os = "linux")]
-fn main() {
-    use report::Report;
-    use std::ffi::CString;
-    use std::process::exit;
+#[cfg(target_os = "windows")]
+mod win_contain;
 
-    let args: Vec<String> = std::env::args().collect();
+/// A parsed command invocation, shared by the OS backends.
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+struct Invocation {
+    policy_path: String,
+    report_path: Option<String>,
+    // Read by the Linux backend; the Windows Job Object backend always applies.
+    #[allow(dead_code)]
+    strict: bool,
+    command: Vec<String>,
+}
 
-    if args.iter().any(|a| a == "--probe") {
-        print_probe();
-        return;
-    }
-
-    // Parse arguments up to the `--` command separator.
+/// Parse the CLI up to the `--` separator. Returns `Err(exit_code)` on a usage
+/// error, after printing a message.
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+fn parse_invocation(args: &[String]) -> Result<Invocation, i32> {
     let mut policy_path: Option<String> = None;
     let mut report_path: Option<String> = None;
     let mut strict = false;
@@ -62,39 +71,70 @@ fn main() {
                 report_path = args.get(i).cloned();
             }
             "--strict" => strict = true,
-            "--allow-degraded" => {} // accepted for symmetry; --strict is the gate
+            "--allow-degraded" => {}
             "--" => {
                 command = args.get(i + 1..).map(|s| s.to_vec()).unwrap_or_default();
                 break;
             }
             other => {
                 eprintln!("asphallea-run: unexpected argument: {other}");
-                exit(2);
+                return Err(2);
             }
         }
         i += 1;
     }
-
-    let policy_path = policy_path.unwrap_or_else(|| {
-        eprintln!("asphallea-run: --policy <file> is required");
-        exit(2);
-    });
+    let policy_path = match policy_path {
+        Some(p) => p,
+        None => {
+            eprintln!("asphallea-run: --policy <file> is required");
+            return Err(2);
+        }
+    };
     if command.is_empty() {
         eprintln!("asphallea-run: no command given after --");
-        exit(2);
+        return Err(2);
+    }
+    Ok(Invocation {
+        policy_path,
+        report_path,
+        strict,
+        command,
+    })
+}
+
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+fn load_policy(path: &str) -> policy::Policy {
+    let text = std::fs::read_to_string(path).unwrap_or_else(|e| {
+        eprintln!("asphallea-run: cannot read policy {path}: {e}");
+        std::process::exit(2);
+    });
+    serde_json::from_str(&text).unwrap_or_else(|e| {
+        eprintln!("asphallea-run: cannot parse policy: {e}");
+        std::process::exit(2);
+    })
+}
+
+// ---------------------------------------------------------------- Linux engine
+
+#[cfg(target_os = "linux")]
+fn main() {
+    use report::Report;
+    use std::ffi::CString;
+    use std::process::exit;
+
+    let args: Vec<String> = std::env::args().collect();
+    if args.iter().any(|a| a == "--probe") {
+        print_probe();
+        return;
     }
 
-    let text = std::fs::read_to_string(&policy_path).unwrap_or_else(|e| {
-        eprintln!("asphallea-run: cannot read policy {policy_path}: {e}");
-        exit(2);
-    });
-    let policy: policy::Policy = serde_json::from_str(&text).unwrap_or_else(|e| {
-        eprintln!("asphallea-run: cannot parse policy: {e}");
-        exit(2);
-    });
+    let inv = parse_invocation(&args).unwrap_or_else(|c| exit(c));
+    let policy = load_policy(&inv.policy_path);
+    let strict = inv.strict;
 
     let mut report = Report {
         platform: "linux".to_string(),
+        backend: "linux-landlock-seccomp".to_string(),
         policy: policy.name.clone(),
         ..Default::default()
     };
@@ -108,14 +148,13 @@ fn main() {
     // governs open(2), not writes to an already-open descriptor, so opening here
     // lets us still write the report after restrict_self even though the report
     // path typically sits outside the write allowlist.
-    let mut report_file: Option<std::fs::File> = report_path.as_ref().and_then(|p| {
+    let mut report_file: Option<std::fs::File> = inv.report_path.as_ref().and_then(|p| {
         std::fs::File::create(p)
             .map_err(|e| eprintln!("asphallea-run: cannot open report {p}: {e}"))
             .ok()
     });
 
-    // 1. no_new_privs: required for unprivileged Landlock and seccomp. Use the
-    // raw prctl so we do not couple to a specific nix prctl API surface.
+    // 1. no_new_privs: required for unprivileged Landlock and seccomp.
     let nnp = unsafe {
         libc::prctl(
             libc::PR_SET_NO_NEW_PRIVS,
@@ -170,18 +209,17 @@ fn main() {
     // 6. write the report through the descriptor opened before Landlock, then exec.
     flush_report(&mut report_file, &report);
 
-    // 7. exec the command. Landlock, seccomp, rlimits, and namespaces are all
-    // inherited across execve, so the command runs contained.
-    let prog = CString::new(command[0].as_bytes()).unwrap_or_else(|_| {
+    let prog = CString::new(inv.command[0].as_bytes()).unwrap_or_else(|_| {
         eprintln!("asphallea-run: invalid command name");
         exit(2);
     });
-    let cargs: Vec<CString> = command
+    let cargs: Vec<CString> = inv
+        .command
         .iter()
         .filter_map(|a| CString::new(a.as_bytes()).ok())
         .collect();
     let err = nix::unistd::execvp(&prog, &cargs).unwrap_err();
-    eprintln!("asphallea-run: could not exec {}: {}", command[0], err);
+    eprintln!("asphallea-run: could not exec {}: {}", inv.command[0], err);
     exit(127);
 }
 
@@ -213,21 +251,60 @@ fn print_probe() {
     );
 }
 
-// The containment tier is Linux only. The SDK never invokes this binary off
-// Linux, but if someone does, be explicit rather than pretend containment.
-#[cfg(not(target_os = "linux"))]
+// -------------------------------------------------------------- Windows engine
+
+#[cfg(target_os = "windows")]
+fn main() {
+    use report::Report;
+    use std::process::exit;
+
+    let args: Vec<String> = std::env::args().collect();
+    if args.iter().any(|a| a == "--probe") {
+        print_probe_windows();
+        return;
+    }
+
+    let inv = parse_invocation(&args).unwrap_or_else(|c| exit(c));
+    let policy = load_policy(&inv.policy_path);
+
+    let mut report = Report {
+        platform: "windows".to_string(),
+        backend: "windows-job-object".to_string(),
+        policy: policy.name.clone(),
+        ..Default::default()
+    };
+
+    let code = win_contain::run(&policy, &inv.command, &mut report, &inv.report_path);
+    exit(code);
+}
+
+#[cfg(target_os = "windows")]
+fn print_probe_windows() {
+    println!(
+        "{{\"version\":\"{}\",\"platform\":\"windows\",\"backend\":\"windows-job-object\",\
+         \"resource_limits\":true,\"process_kill\":true,\"filesystem_sandbox\":false,\
+         \"network_sandbox\":false}}",
+        env!("CARGO_PKG_VERSION")
+    );
+}
+
+// ----------------------------------------------------- Other platforms (macOS)
+
+// No containment engine yet on this OS. The SDK never invokes this binary here,
+// but if someone does, be explicit rather than pretend containment.
+#[cfg(not(any(target_os = "linux", target_os = "windows")))]
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.iter().any(|a| a == "--probe") {
         println!(
-            "{{\"version\":\"{}\",\"platform\":\"{}\",\"landlock_abi\":0,\"seccomp\":false,\"user_namespaces\":false,\"net_namespaces\":false}}",
+            "{{\"version\":\"{}\",\"platform\":\"{}\",\"backend\":\"none\",\"resource_limits\":false,\"process_kill\":false,\"filesystem_sandbox\":false,\"network_sandbox\":false}}",
             env!("CARGO_PKG_VERSION"),
             std::env::consts::OS
         );
         return;
     }
     eprintln!(
-        "asphallea-run: OS containment is available on Linux only; this host is {}.",
+        "asphallea-run: no OS containment engine for {} yet (macOS Seatbelt is planned).",
         std::env::consts::OS
     );
     std::process::exit(3);
