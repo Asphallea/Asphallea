@@ -1,0 +1,7 @@
+# Normalize line endings to LF across platforms. This repo ships shell-adjacent
+# artifacts (JSONL audit logs, POSIX shell in examples) where CRLF would be wrong.
+* text=auto eol=lf
+
+*.png binary
+*.jpg binary
+*.gif binary
