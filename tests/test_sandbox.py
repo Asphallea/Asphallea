@@ -1,13 +1,16 @@
 """Tests for the containment tier.
 
-The policy-tier gating and the degraded/fail-closed behavior are tested on any
-platform. The real OS containment tests require a Linux host with the
-``asphallea-run`` core binary built, and are skipped otherwise.
+Containment coverage differs per OS, so the gates are per capability, not a single
+flag. The policy-tier gating is tested everywhere. The fail-closed and degraded
+paths run wherever the sample policy is not fully contained. The real filesystem
+containment assertions run on Linux (Landlock); the Job Object resource and
+termination assertions run on Windows.
 """
 
 from __future__ import annotations
 
 import os
+import platform
 import sys
 
 import pytest
@@ -21,13 +24,23 @@ from asphallea import (
 )
 
 CAPS = capabilities()
-CONTAINED = CAPS.can_contain
+IS_LINUX = platform.system() == "Linux"
+IS_WINDOWS = platform.system() == "Windows"
 
-need_uncontained = pytest.mark.skipif(
-    CONTAINED, reason="OS containment is available here; testing the unavailable path"
+# The sample policy below requires filesystem and network containment. It is fully
+# covered only by a complete backend (Linux Landlock + seccomp).
+BASE_COVERED = CAPS.covers(filesystem=True, network=True)
+
+uncovered = pytest.mark.skipif(
+    BASE_COVERED, reason="the sample policy is fully contained on this host"
 )
-need_contained = pytest.mark.skipif(
-    not CONTAINED, reason="requires Linux with the asphallea-run core binary built"
+linux_contained = pytest.mark.skipif(
+    not (IS_LINUX and CAPS.can_contain),
+    reason="requires the Linux Landlock/seccomp backend",
+)
+windows_contained = pytest.mark.skipif(
+    not (IS_WINDOWS and CAPS.can_contain),
+    reason="requires the Windows Job Object backend",
 )
 
 
@@ -46,12 +59,31 @@ def base_policy(tmp_path):
     )
 
 
+def resource_policy():
+    """A policy needing only resource limits, coverable by the Windows backend."""
+    return (
+        Policy.builder("res")
+        .allow_tools("run_shell")
+        .allow_network()
+        .limits(cpu_seconds=10, memory_mb=512, max_processes=32)
+        .build()
+    )
+
+
 def test_capabilities_shape():
     caps = capabilities()
     assert caps.platform in ("Linux", "Darwin", "Windows")
     assert isinstance(caps.explain(), str)
-    if caps.platform != "Linux":
-        assert caps.can_contain is False
+    for flag in (
+        caps.filesystem_sandbox,
+        caps.network_sandbox,
+        caps.resource_limits,
+        caps.process_kill,
+    ):
+        assert isinstance(flag, bool)
+    # can_contain implies a backend binary was located.
+    if caps.can_contain:
+        assert caps.core_binary is not None
 
 
 def test_run_requires_policy_or_engine(tmp_path):
@@ -68,15 +100,15 @@ def test_policy_tier_tool_allowlist_denies(tmp_path):
     assert exc.value.decision.rule == "tool_allowlist"
 
 
-@need_uncontained
-def test_fail_closed_when_unavailable(tmp_path):
+@uncovered
+def test_fail_closed_when_uncovered(tmp_path):
     policy = base_policy(tmp_path)
     with pytest.raises(ContainmentUnavailable) as exc:
         sandbox.run([sys.executable, "-c", "print('x')"], policy=policy, tool="run_shell")
     assert exc.value.decision.rule == "containment_unavailable"
 
 
-@need_uncontained
+@uncovered
 def test_degraded_mode_runs_and_warns(tmp_path):
     policy = base_policy(tmp_path)
     with pytest.warns(RuntimeWarning):
@@ -91,7 +123,7 @@ def test_degraded_mode_runs_and_warns(tmp_path):
     assert "degraded-ok" in result.stdout
 
 
-@need_uncontained
+@uncovered
 def test_degraded_mode_audits(tmp_path):
     from asphallea import AuditLog
 
@@ -110,10 +142,10 @@ def test_degraded_mode_audits(tmp_path):
     assert any('"tier": "containment"' in line and '"degraded"' in line for line in lines)
 
 
-# --- real OS containment (Linux only) --------------------------------------
+# --- real filesystem containment (Linux) -----------------------------------
 
 
-@need_contained
+@linux_contained
 def test_contained_allows_write_inside(tmp_path):
     policy = base_policy(tmp_path)
     target = str(tmp_path / "ws" / "out" / "ok.txt")
@@ -122,7 +154,7 @@ def test_contained_allows_write_inside(tmp_path):
     assert os.path.exists(target)
 
 
-@need_contained
+@linux_contained
 def test_contained_blocks_read_outside(tmp_path):
     policy = base_policy(tmp_path)
     secret = str(tmp_path / "secret.txt")
@@ -134,7 +166,7 @@ def test_contained_blocks_read_outside(tmp_path):
     assert "TOPSECRET" not in result.stdout
 
 
-@need_contained
+@linux_contained
 def test_contained_blocks_write_outside(tmp_path):
     policy = base_policy(tmp_path)
     target = str(tmp_path / "escape.txt")
@@ -143,8 +175,44 @@ def test_contained_blocks_write_outside(tmp_path):
     assert not os.path.exists(target)
 
 
-@need_contained
+@linux_contained
 def test_probe_reports_landlock():
     caps = capabilities(refresh=True)
     assert caps.landlock_abi >= 1
     assert caps.seccomp is True
+    assert caps.filesystem_sandbox is True
+
+
+# --- Job Object containment (Windows) --------------------------------------
+
+
+@windows_contained
+def test_windows_resource_policy_runs_contained():
+    # A resource-only policy is fully covered by the Job Object backend.
+    result = sandbox.run(
+        [sys.executable, "-c", "print('win-contained')"],
+        policy=resource_policy(),
+        tool="run_shell",
+    )
+    assert result.contained is True
+    assert result.returncode == 0
+    assert "win-contained" in result.stdout
+    assert result.controls.get("backend") == "windows-job-object"
+
+
+@windows_contained
+def test_windows_filesystem_policy_fails_closed(tmp_path):
+    # The Job Object backend does not do filesystem allowlisting yet, so a policy
+    # that requires it must fail closed, not run partially contained.
+    policy = base_policy(tmp_path)
+    with pytest.raises(ContainmentUnavailable) as exc:
+        sandbox.run([sys.executable, "-c", "print('x')"], policy=policy, tool="run_shell")
+    assert "filesystem" in exc.value.decision.reason.lower()
+
+
+@windows_contained
+def test_windows_probe_reports_backend():
+    caps = capabilities(refresh=True)
+    assert caps.backend == "windows-job-object"
+    assert caps.resource_limits is True
+    assert caps.process_kill is True

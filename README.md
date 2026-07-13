@@ -36,11 +36,13 @@ containment. Asphallea does, on Linux, where it counts.
 declarative policy, allowed or denied deterministically, and logged. Works on
 Linux, macOS, and Windows. This alone is useful.
 
-**Containment tier.** Linux first. For high-blast-radius tools that spawn processes,
-execute code, or run shell commands, Asphallea contains them at the OS level: a
-Landlock filesystem allowlist, seccomp-bpf syscall and network filtering, resource
-limits, and network-namespace isolation. This is the part a pure-ML competitor
-cannot replicate.
+**Containment tier.** For high-blast-radius tools that spawn processes, execute
+code, or run shell commands, Asphallea contains them at the OS level using each
+platform's own engine. Linux gets a Landlock filesystem allowlist, seccomp-bpf
+syscall and network filtering, resource limits, and network-namespace isolation.
+Windows gets a Job Object that bounds memory, CPU, and process count and guarantees
+the whole process tree is killed. This is the part a pure-ML competitor cannot
+replicate.
 
 ## Install
 
@@ -210,24 +212,37 @@ OpenAI and Anthropic tool-calling adapters are fast-follow.
 
 ## Honest platform support
 
-Real containment is Linux first. On macOS and Windows the policy tier works fully,
-but the OS-containment tier is not available and Asphallea says so, loudly, rather
-than pretending.
+Each OS has its own containment engine, and the coverage differs. Asphallea reports
+what it actually enforces per dimension and never claims more. When a policy needs a
+dimension the local backend cannot deliver, it fails closed rather than run
+partially contained.
 
-| Capability | Linux 5.13+ | macOS | Windows |
+| Capability | Linux 5.13+ | Windows | macOS |
 | --- | --- | --- | --- |
 | Policy tier: allow/deny, allowlists, rate, spend, timeout | yes | yes | yes |
 | Audit trail (JSONL) | yes | yes | yes |
-| Filesystem allowlist at the OS level | yes (Landlock) | no | no |
-| Syscall filtering | yes (seccomp-bpf) | no | no |
-| Network deny at the OS level | yes (seccomp + netns) | no | no |
-| Resource limits | yes (setrlimit) | no | no |
-| Containment default when unavailable | n/a | fails closed | fails closed |
+| Filesystem allowlist at the OS level | yes (Landlock) | planned (AppContainer) | planned (Seatbelt) |
+| Network deny at the OS level | yes (seccomp + netns) | planned (AppContainer) | planned (Seatbelt) |
+| Syscall filtering | yes (seccomp-bpf) | n/a | planned (Seatbelt) |
+| Resource limits (memory, CPU, processes) | yes (setrlimit) | yes (Job Objects) | planned |
+| Guaranteed process-tree termination | yes | yes (Job Objects) | planned |
+| Containment engine | Landlock + seccomp | Job Objects | none yet |
 
-The policy tier still enforces the tool allowlist, path allowlist, rate limits,
-spend caps, and timeouts on macOS and Windows. What degrades is only the OS-level
-containment of spawned processes, and it degrades to a refusal, not to a false sense
-of safety.
+The policy tier enforces the tool allowlist, path allowlist, rate limits, spend
+caps, and timeouts identically on all three. The containment tier is where the OS
+matters:
+
+- **Linux** contains fully: filesystem allowlist, network deny, syscall filter, and
+  resource limits, applied to the process and everything it spawns.
+- **Windows** contains resources and guarantees the whole process tree is killed
+  (Job Objects). Filesystem and network allowlisting for arbitrary subprocesses is
+  the next backend (AppContainer). A policy that requires filesystem or network
+  containment fails closed on Windows today rather than run exposed.
+- **macOS** has no containment engine yet (Seatbelt is planned), so it fails closed.
+
+Failing closed means the dangerous command does not run. The harm is prevented; what
+is missing is the ability to run that specific command while allowlisting its
+filesystem, which the planned backends add.
 
 ## Architecture
 
