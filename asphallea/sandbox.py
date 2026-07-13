@@ -3,17 +3,20 @@
 Tools that spawn processes, execute generated code, or run a shell are the ones a
 hijacked agent turns into a weapon. The policy tier can gate whether such a tool
 runs at all, but it cannot contain what the spawned process then does. This module
-does, by handing the command to the ``asphallea-run`` Rust core, which applies a
-Landlock filesystem allowlist, a seccomp-bpf syscall and network filter, resource
-limits, and best-effort network-namespace isolation before it executes the command.
+does, by handing the command to the ``asphallea-run`` Rust core, which applies the
+running platform's containment engine before it executes the command. On Linux that
+is a Landlock filesystem allowlist, a seccomp-bpf syscall and network filter,
+resource limits, and network-namespace isolation. On Windows it is a Job Object that
+bounds memory, CPU, and process count and guarantees the whole process tree is
+killed.
 
-Honesty about platforms is the whole point. Real containment is Linux first and
-needs a recent kernel. This module probes what the running kernel and the installed
-core binary can actually do, and it never claims containment it cannot deliver. When
-containment is unavailable it fails closed by default: the command does not run, the
-refusal is logged, and a loud message explains what is missing. A developer who
-understands the risk can opt into degraded, uncontained execution, which is logged
-on every call so it can never pass silently.
+Honesty about platforms is the whole point. Containment coverage differs per OS, so
+this module probes what the running host can actually enforce, per dimension, and
+never claims more. A run proceeds contained only when the backend covers every
+dimension the policy requires. When it does not, the call fails closed by default:
+the command does not run, the refusal is logged, and the message names exactly which
+dimension is missing. A developer who understands the risk can opt into degraded,
+uncontained execution, which is logged on every call so it can never pass silently.
 """
 
 from __future__ import annotations
@@ -61,18 +64,37 @@ class ContainmentUnavailable(PolicyViolation):
 class Capabilities:
     """What OS containment the running environment can actually deliver.
 
+    Containment is multi-dimensional and the coverage differs per OS, so this is
+    reported per dimension rather than as a single yes/no. Linux delivers all four
+    (Landlock filesystem, seccomp network, resource limits, process termination).
+    Windows delivers resource limits and guaranteed process termination via Job
+    Objects today; filesystem and network allowlisting (AppContainer) are the next
+    backend. macOS has no engine yet.
+
     Attributes:
         platform: The OS name, for example ``"Linux"``.
         core_binary: Path to the ``asphallea-run`` binary, or ``None``.
-        landlock_abi: The Landlock ABI version the kernel supports, or 0.
-        seccomp: Whether seccomp-bpf filtering is available.
-        user_namespaces: Whether unprivileged user namespaces are available.
-        net_namespaces: Whether network-namespace isolation is available.
+        backend: The containment engine, for example ``"linux-landlock-seccomp"``
+            or ``"windows-job-object"``, or ``"none"``.
+        filesystem_sandbox: Whether the backend enforces a filesystem allowlist.
+        network_sandbox: Whether the backend denies network at the OS level.
+        resource_limits: Whether the backend enforces memory/CPU/process limits.
+        process_kill: Whether the backend guarantees termination of the process
+            tree.
+        landlock_abi: Linux only. The Landlock ABI version, or 0.
+        seccomp: Linux only. Whether seccomp-bpf is available.
+        user_namespaces: Linux only.
+        net_namespaces: Linux only.
         version: The core binary version string, if known.
     """
 
     platform: str
     core_binary: Optional[str]
+    backend: str = "none"
+    filesystem_sandbox: bool = False
+    network_sandbox: bool = False
+    resource_limits: bool = False
+    process_kill: bool = False
     landlock_abi: int = 0
     seccomp: bool = False
     user_namespaces: bool = False
@@ -81,35 +103,57 @@ class Capabilities:
 
     @property
     def can_contain(self) -> bool:
-        """True when the core can enforce at least filesystem and syscall limits."""
-        return (
-            self.platform == "Linux"
-            and self.core_binary is not None
-            and self.landlock_abi >= 1
-            and self.seccomp
+        """True when a real OS containment backend is present on this host."""
+        return self.core_binary is not None and (
+            self.filesystem_sandbox or self.resource_limits or self.process_kill
         )
 
+    def covers(self, *, filesystem: bool, network: bool) -> bool:
+        """Whether the backend enforces every dimension a policy requires."""
+        if not self.can_contain:
+            return False
+        if filesystem and not self.filesystem_sandbox:
+            return False
+        if network and not self.network_sandbox:
+            return False
+        return True
+
+    def dimensions(self) -> str:
+        """A human list of what the backend enforces."""
+        parts = []
+        if self.filesystem_sandbox:
+            parts.append("filesystem allowlist")
+        if self.network_sandbox:
+            parts.append("network deny")
+        if self.resource_limits:
+            parts.append("resource limits")
+        if self.process_kill:
+            parts.append("process termination")
+        return ", ".join(parts) if parts else "nothing"
+
+    def shortfall(self, *, filesystem: bool, network: bool) -> str:
+        """The required dimensions this backend cannot enforce."""
+        missing = []
+        if filesystem and not self.filesystem_sandbox:
+            missing.append("filesystem allowlisting")
+        if network and not self.network_sandbox:
+            missing.append("network isolation")
+        return ", ".join(missing)
+
     def explain(self) -> str:
-        """Return a one-line, specific reason containment is or is not available."""
-        if self.platform != "Linux":
+        """Return a one-line summary of what containment this host delivers."""
+        if not self.can_contain:
+            if self.core_binary is None:
+                return (
+                    f"the {CORE_BINARY_NAME} core binary was not found for "
+                    f"{self.platform}. Build it in core/ (cargo build --release) and "
+                    "put it on PATH or set ASPHALLEA_CORE_BIN."
+                )
             return (
-                f"OS containment is Linux only. This host is {self.platform}. "
-                "The policy tier still enforces; the containment tier is unavailable."
+                f"no OS containment engine is available on {self.platform} yet "
+                "(macOS Seatbelt is planned)."
             )
-        if self.core_binary is None:
-            return (
-                f"the {CORE_BINARY_NAME} core binary was not found. Build it with "
-                "`cargo build --release` in core/ and put it on PATH or set "
-                "ASPHALLEA_CORE_BIN."
-            )
-        if self.landlock_abi < 1:
-            return (
-                "this kernel does not support Landlock (needs 5.13+). Filesystem "
-                "containment cannot be enforced."
-            )
-        if not self.seccomp:
-            return "this kernel does not support seccomp-bpf. Syscall filtering cannot be enforced."
-        return "OS containment is available."
+        return f"{self.backend} on {self.platform} contains: {self.dimensions()}."
 
 
 @dataclass
@@ -184,7 +228,7 @@ def capabilities(*, refresh: bool = False) -> Capabilities:
     binary = core_binary()
 
     caps = Capabilities(platform=system, core_binary=binary)
-    if system == "Linux" and binary is not None:
+    if binary is not None and system in ("Linux", "Windows"):
         caps = _probe(binary, system)
 
     _CAPS_CACHE = caps
@@ -203,13 +247,33 @@ def _probe(binary: str, system: str) -> Capabilities:
     except (OSError, subprocess.SubprocessError, ValueError):
         return Capabilities(platform=system, core_binary=binary)
 
+    if system == "Linux":
+        landlock_abi = int(data.get("landlock_abi", 0))
+        seccomp = bool(data.get("seccomp", False))
+        return Capabilities(
+            platform=system,
+            core_binary=binary,
+            backend="linux-landlock-seccomp",
+            filesystem_sandbox=landlock_abi >= 1,
+            network_sandbox=seccomp,  # seccomp blocks IP socket creation
+            resource_limits=True,
+            process_kill=True,
+            landlock_abi=landlock_abi,
+            seccomp=seccomp,
+            user_namespaces=bool(data.get("user_namespaces", False)),
+            net_namespaces=bool(data.get("net_namespaces", False)),
+            version=data.get("version"),
+        )
+
+    # Windows: the Job Object backend reports its dimensions directly.
     return Capabilities(
         platform=system,
         core_binary=binary,
-        landlock_abi=int(data.get("landlock_abi", 0)),
-        seccomp=bool(data.get("seccomp", False)),
-        user_namespaces=bool(data.get("user_namespaces", False)),
-        net_namespaces=bool(data.get("net_namespaces", False)),
+        backend=str(data.get("backend", "windows-job-object")),
+        filesystem_sandbox=bool(data.get("filesystem_sandbox", False)),
+        network_sandbox=bool(data.get("network_sandbox", False)),
+        resource_limits=bool(data.get("resource_limits", False)),
+        process_kill=bool(data.get("process_kill", False)),
         version=data.get("version"),
     )
 
@@ -269,9 +333,22 @@ def run(
         raise PolicyViolation(decision, tool)
 
     caps = capabilities()
+    # Which containment dimensions does this policy actually require?
+    requires_fs = bool(policy.read_paths or policy.write_paths)
+    requires_net = policy.network == "deny"
 
-    if not caps.can_contain:
-        reason = caps.explain()
+    if not caps.covers(filesystem=requires_fs, network=requires_net):
+        # The backend cannot enforce every dimension this policy requires. Fail
+        # closed rather than run partially contained and pretend otherwise.
+        if caps.can_contain:
+            short = caps.shortfall(filesystem=requires_fs, network=requires_net)
+            reason = (
+                f"{caps.backend} on {caps.platform} enforces {caps.dimensions()}, but "
+                f"this policy also requires {short}, which this backend cannot deliver "
+                "yet. Failing closed rather than run partially contained."
+            )
+        else:
+            reason = caps.explain()
         if not allow_degraded:
             deny = Decision.deny("containment_unavailable", reason)
             _audit(audit, tool, deny, command, policy.name, tier="containment",
@@ -279,11 +356,11 @@ def run(
             raise ContainmentUnavailable(deny, tool)
 
         message = (
-            f"ASPHALLEA DEGRADED MODE: running {tool!r} WITHOUT OS containment. {reason}"
+            f"ASPHALLEA DEGRADED MODE: running {tool!r} without full OS containment. {reason}"
         )
         warnings.warn(message, RuntimeWarning, stacklevel=2)
         print(message, file=sys.stderr)
-        degraded_allow = Decision.allow("ran without OS containment (allow_degraded)")
+        degraded_allow = Decision.allow("ran without full OS containment (allow_degraded)")
         _audit(audit, tool, degraded_allow, command, policy.name, tier="containment",
                rule="degraded", detail={"capabilities": _caps_dict(caps)})
         proc = _exec(command, timeout=timeout, cwd=cwd, env=env, input=input)
@@ -399,9 +476,12 @@ def _audit(audit, tool, decision, command, policy_name, *, tier, rule=None, deta
 def _caps_dict(caps: Capabilities) -> Dict[str, Any]:
     return {
         "platform": caps.platform,
+        "backend": caps.backend,
         "core_binary": caps.core_binary,
+        "filesystem_sandbox": caps.filesystem_sandbox,
+        "network_sandbox": caps.network_sandbox,
+        "resource_limits": caps.resource_limits,
+        "process_kill": caps.process_kill,
         "landlock_abi": caps.landlock_abi,
         "seccomp": caps.seccomp,
-        "user_namespaces": caps.user_namespaces,
-        "net_namespaces": caps.net_namespaces,
     }
