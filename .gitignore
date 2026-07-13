@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Rust
+core/target/
+**/*.rs.bk
+
+# Local audit artifacts and scratch
+*.jsonl
+!policies/*.jsonl
+.DS_Store
+
+# Local editor / harness settings
+.claude/
+.remember/
