@@ -95,6 +95,7 @@ fn main() {
 
     let mut report = Report {
         platform: "linux".to_string(),
+        policy: policy.name.clone(),
         ..Default::default()
     };
     report.network = if policy.network_denied() {

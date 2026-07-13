@@ -104,9 +104,11 @@ pub fn apply(network_denied: bool, report: &mut Report) -> bool {
 
     let filter = match SeccompFilter::new(
         rules,
-        SeccompAction::Allow,                     // mismatch: allow anything not listed
+        SeccompAction::Allow, // mismatch: allow anything not listed
         SeccompAction::Errno(libc::EPERM as u32), // match: deny with EPERM
-        std::env::consts::ARCH.try_into().expect("supported target arch"),
+        std::env::consts::ARCH
+            .try_into()
+            .expect("supported target arch"),
     ) {
         Ok(f) => f,
         Err(e) => {
