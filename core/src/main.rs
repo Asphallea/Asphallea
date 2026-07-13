@@ -104,6 +104,16 @@ fn main() {
         "allowed".to_string()
     };
 
+    // Open the report file now, before Landlock restricts the filesystem. Landlock
+    // governs open(2), not writes to an already-open descriptor, so opening here
+    // lets us still write the report after restrict_self even though the report
+    // path typically sits outside the write allowlist.
+    let mut report_file: Option<std::fs::File> = report_path.as_ref().and_then(|p| {
+        std::fs::File::create(p)
+            .map_err(|e| eprintln!("asphallea-run: cannot open report {p}: {e}"))
+            .ok()
+    });
+
     // 1. no_new_privs: required for unprivileged Landlock and seccomp. Use the
     // raw prctl so we do not couple to a specific nix prctl API surface.
     let nnp = unsafe {
@@ -133,7 +143,7 @@ fn main() {
     landlock_fs::apply(&policy, &mut report);
     if strict && report.landlock_status == "not_enforced" {
         report.contained = false;
-        write_report(&report_path, &report);
+        flush_report(&mut report_file, &report);
         eprintln!(
             "asphallea-run: filesystem containment could not be enforced and --strict is set. \
              Refusing to run uncontained."
@@ -145,7 +155,7 @@ fn main() {
     let seccomp_ok = seccomp::apply(policy.network_denied(), &mut report);
     if strict && !seccomp_ok {
         report.contained = false;
-        write_report(&report_path, &report);
+        flush_report(&mut report_file, &report);
         eprintln!(
             "asphallea-run: syscall filtering could not be applied and --strict is set. \
              Refusing to run uncontained."
@@ -157,9 +167,8 @@ fn main() {
         && report.landlock_status != "unsupported"
         && report.seccomp_applied;
 
-    // 6. persist the report before exec. The fd closes on exec, but the bytes are
-    // already flushed to disk.
-    write_report(&report_path, &report);
+    // 6. write the report through the descriptor opened before Landlock, then exec.
+    flush_report(&mut report_file, &report);
 
     // 7. exec the command. Landlock, seccomp, rlimits, and namespaces are all
     // inherited across execve, so the command runs contained.
@@ -177,10 +186,12 @@ fn main() {
 }
 
 #[cfg(target_os = "linux")]
-fn write_report(path: &Option<String>, report: &report::Report) {
-    if let Some(p) = path {
+fn flush_report(file: &mut Option<std::fs::File>, report: &report::Report) {
+    use std::io::Write;
+    if let Some(f) = file {
         if let Ok(text) = serde_json::to_string(report) {
-            let _ = std::fs::write(p, text);
+            let _ = f.write_all(text.as_bytes());
+            let _ = f.flush();
         }
     }
 }
