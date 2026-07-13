@@ -282,12 +282,14 @@ fn main() {
 
 #[cfg(target_os = "windows")]
 fn print_probe_windows() {
-    // AppContainer (filesystem + network) is available on Windows 8+, which is
-    // every supported Windows. Job Objects give resources and termination.
+    // Job Objects give resources and termination everywhere. AppContainer
+    // (filesystem + network) is verified, not assumed, so a locked-down host is
+    // reported honestly.
+    let ac = win_appcontainer::available();
     println!(
         "{{\"version\":\"{}\",\"platform\":\"windows\",\"backend\":\"windows-appcontainer-job\",\
-         \"resource_limits\":true,\"process_kill\":true,\"filesystem_sandbox\":true,\
-         \"network_sandbox\":true}}",
+         \"resource_limits\":true,\"process_kill\":true,\"filesystem_sandbox\":{ac},\
+         \"network_sandbox\":{ac}}}",
         env!("CARGO_PKG_VERSION")
     );
 }

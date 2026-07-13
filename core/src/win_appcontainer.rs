@@ -256,6 +256,30 @@ fn explicit_access(
     ea
 }
 
+/// Whether AppContainer profiles can be created on this host. Verified by
+/// creating and deleting a throwaway profile rather than assumed from the OS
+/// version, so a locked-down host reports honestly.
+pub fn available() -> bool {
+    let name = to_wide("asphallea.probe");
+    let mut sid: PSID = std::ptr::null_mut();
+    unsafe {
+        let hr = CreateAppContainerProfile(
+            name.as_ptr(),
+            name.as_ptr(),
+            name.as_ptr(),
+            std::ptr::null(),
+            0,
+            &mut sid,
+        );
+        let ok = hr == 0 || DeriveAppContainerSidFromAppContainerName(name.as_ptr(), &mut sid) >= 0;
+        if !sid.is_null() {
+            FreeSid(sid);
+        }
+        DeleteAppContainerProfile(name.as_ptr());
+        ok
+    }
+}
+
 fn to_wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
 }

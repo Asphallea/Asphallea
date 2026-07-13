@@ -88,9 +88,10 @@ jobs:
         run: python examples/injection_demo.py
 
   containment-windows:
-    # Builds the Windows core and runs the suite with the Job Object backend
-    # available, so the Windows containment tests execute: a resource-only policy
-    # runs contained, and a filesystem policy fails closed.
+    # Builds the Windows core and runs the suite with the backend available, so the
+    # Windows containment tests execute: the AppContainer blocks reads and writes
+    # outside the allowlist and allows the workspace, and the Job Object bounds
+    # resources.
     name: containment tier (windows)
     runs-on: windows-latest
     steps:
