@@ -103,11 +103,21 @@ fn main() {
         "allowed".to_string()
     };
 
-    // 1. no_new_privs: required for unprivileged Landlock and seccomp.
-    if let Err(e) = nix::sys::prctl::set_no_new_privs() {
+    // 1. no_new_privs: required for unprivileged Landlock and seccomp. Use the
+    // raw prctl so we do not couple to a specific nix prctl API surface.
+    let nnp = unsafe {
+        libc::prctl(
+            libc::PR_SET_NO_NEW_PRIVS,
+            1 as libc::c_ulong,
+            0 as libc::c_ulong,
+            0 as libc::c_ulong,
+            0 as libc::c_ulong,
+        )
+    };
+    if nnp != 0 {
         report
             .warnings
-            .push(format!("could not set no_new_privs: {e}"));
+            .push("could not set no_new_privs".to_string());
     }
 
     // 2. resource limits.
