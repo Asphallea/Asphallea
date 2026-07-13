@@ -6,9 +6,9 @@ runs at all, but it cannot contain what the spawned process then does. This modu
 does, by handing the command to the ``asphallea-run`` Rust core, which applies the
 running platform's containment engine before it executes the command. On Linux that
 is a Landlock filesystem allowlist, a seccomp-bpf syscall and network filter,
-resource limits, and network-namespace isolation. On Windows it is a Job Object that
-bounds memory, CPU, and process count and guarantees the whole process tree is
-killed.
+resource limits, and network-namespace isolation. On Windows it is an AppContainer
+filesystem allowlist and network deny inside a Job Object that bounds memory, CPU,
+and process count and guarantees the whole process tree is killed.
 
 Honesty about platforms is the whole point. Containment coverage differs per OS, so
 this module probes what the running host can actually enforce, per dimension, and
