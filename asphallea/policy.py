@@ -1,0 +1,408 @@
+"""Declarative least-privilege policy for agent tool-execution.
+
+A :class:`Policy` is an immutable description of what an agent is allowed to do:
+which tools it may call, which filesystem paths it may read or write, whether it
+may touch the network, how often it may call a tool, how long a call may run, and
+how many times a paid tool may be invoked.
+
+Policies are built two ways:
+
+* fluently, with :meth:`Policy.builder`
+* declaratively, from YAML, with :meth:`Policy.from_yaml`
+
+A policy carries no runtime state. Counters, rate windows, and spend tallies live
+in the :class:`~asphallea.engine.Engine` that evaluates against the policy, so the
+same policy object can be shared safely across guards.
+"""
+
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Dict, Mapping, Optional, Tuple
+
+__all__ = [
+    "Policy",
+    "PolicyBuilder",
+    "RateLimit",
+    "ResourceLimits",
+    "PolicyError",
+]
+
+
+class PolicyError(ValueError):
+    """Raised when a policy is malformed or internally inconsistent."""
+
+
+def _normalize_path(path: str) -> str:
+    """Return an absolute, symlink-resolved, normalized form of ``path``.
+
+    Resolution is best effort: components that do not exist yet are still
+    normalized. Symlinks are resolved so that an allowlisted prefix cannot be
+    escaped by pointing a link outside it. This is the cross-platform
+    convenience check. On Linux the containment tier enforces the same boundary
+    at the kernel with Landlock, which is inode based and not fooled by links.
+    """
+    return os.path.realpath(os.path.abspath(os.path.expanduser(path)))
+
+
+@dataclass(frozen=True)
+class RateLimit:
+    """A sliding-window rate limit: at most ``max_calls`` per ``window_seconds``."""
+
+    max_calls: int
+    window_seconds: float
+
+    def __post_init__(self) -> None:
+        if self.max_calls <= 0:
+            raise PolicyError("rate limit max_calls must be positive")
+        if self.window_seconds <= 0:
+            raise PolicyError("rate limit window_seconds must be positive")
+
+
+@dataclass(frozen=True)
+class ResourceLimits:
+    """OS resource limits applied by the containment tier on Linux.
+
+    All fields are optional. ``None`` means "do not set this limit". Sizes are
+    given in whole megabytes and whole seconds at this layer; they are converted
+    to bytes and passed to the Rust core when a sandbox is launched.
+    """
+
+    cpu_seconds: Optional[int] = None
+    memory_mb: Optional[int] = None
+    max_file_size_mb: Optional[int] = None
+    max_processes: Optional[int] = None
+    max_open_files: Optional[int] = None
+
+    def to_core_json(self) -> Dict[str, int]:
+        """Serialize to the byte-and-count shape the Rust core expects."""
+        out: Dict[str, int] = {}
+        if self.cpu_seconds is not None:
+            out["cpu_seconds"] = int(self.cpu_seconds)
+        if self.memory_mb is not None:
+            out["memory_bytes"] = int(self.memory_mb) * 1024 * 1024
+        if self.max_file_size_mb is not None:
+            out["max_file_size_bytes"] = int(self.max_file_size_mb) * 1024 * 1024
+        if self.max_processes is not None:
+            out["max_processes"] = int(self.max_processes)
+        if self.max_open_files is not None:
+            out["max_open_files"] = int(self.max_open_files)
+        return out
+
+
+@dataclass(frozen=True)
+class Policy:
+    """An immutable least-privilege policy.
+
+    Attributes:
+        name: A short identifier recorded in every audit line.
+        allowed_tools: If ``None``, tools are not restricted by an allowlist and
+            the act of wrapping a tool is the opt-in. If a set, only listed tool
+            names are permitted and every other tool is denied.
+        read_paths: Absolute, normalized prefixes a tool may read from.
+        write_paths: Absolute, normalized prefixes a tool may write to. A write
+            path also grants read.
+        network: ``"deny"`` or ``"allow"``. When ``"deny"``, a tool declared as
+            network-using is denied at the policy tier, and the containment tier
+            blocks outbound sockets at the syscall layer.
+        max_calls: Per-tool ceiling on total invocations.
+        rate_limits: Per-tool sliding-window rate limit.
+        spend_caps: Per-tool ceiling on invocations of a paid tool. Modeled as a
+            call count. Real-time dollar metering is out of scope for v0.
+        timeout_seconds: Wall-clock ceiling for a single call.
+        limits: OS resource limits for the containment tier.
+    """
+
+    name: str
+    allowed_tools: Optional[frozenset] = None
+    read_paths: Tuple[str, ...] = ()
+    write_paths: Tuple[str, ...] = ()
+    network: str = "deny"
+    max_calls: Mapping[str, int] = field(default_factory=dict)
+    rate_limits: Mapping[str, RateLimit] = field(default_factory=dict)
+    spend_caps: Mapping[str, int] = field(default_factory=dict)
+    timeout_seconds: Optional[float] = None
+    limits: ResourceLimits = field(default_factory=ResourceLimits)
+
+    def __post_init__(self) -> None:
+        if not self.name or not isinstance(self.name, str):
+            raise PolicyError("policy name must be a non-empty string")
+        if self.network not in ("deny", "allow"):
+            raise PolicyError(f"network must be 'deny' or 'allow', got {self.network!r}")
+
+    # -- construction ------------------------------------------------------
+
+    @staticmethod
+    def builder(name: str) -> "PolicyBuilder":
+        """Start a fluent :class:`PolicyBuilder` named ``name``."""
+        return PolicyBuilder(name)
+
+    @classmethod
+    def from_yaml(cls, path: "str | os.PathLike[str]") -> "Policy":
+        """Load a policy from a YAML file.
+
+        See ``policies/example.yaml`` for the schema. Raises
+        :class:`PolicyError` on unknown keys or invalid values so a typo in a
+        security policy fails loudly rather than silently doing nothing.
+        """
+        try:
+            import yaml
+        except ImportError as exc:  # pragma: no cover - dependency always present
+            raise PolicyError(
+                "PyYAML is required to load policies from YAML. "
+                "Install it with `pip install asphallea` or `pip install pyyaml`."
+            ) from exc
+
+        text = Path(path).read_text(encoding="utf-8")
+        data = yaml.safe_load(text) or {}
+        if not isinstance(data, dict):
+            raise PolicyError("policy YAML must be a mapping at the top level")
+        return cls.from_dict(data)
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> "Policy":
+        """Build a policy from a plain mapping following the YAML schema."""
+        known = {"name", "tools", "filesystem", "network", "limits", "spend"}
+        unknown = set(data) - known
+        if unknown:
+            raise PolicyError(f"unknown policy keys: {sorted(unknown)}")
+
+        name = data.get("name")
+        if not name:
+            raise PolicyError("policy is missing required key 'name'")
+
+        builder = PolicyBuilder(str(name))
+
+        tools = data.get("tools") or {}
+        if tools:
+            _reject_unknown(tools, {"allow"}, "tools")
+            for tool in tools.get("allow", []) or []:
+                builder.allow_tool(str(tool))
+
+        fs = data.get("filesystem") or {}
+        if fs:
+            _reject_unknown(fs, {"read", "write"}, "filesystem")
+            for p in fs.get("read", []) or []:
+                builder.read_paths(str(p))
+            for p in fs.get("write", []) or []:
+                builder.write_paths(str(p))
+
+        net = data.get("network") or {}
+        if net:
+            _reject_unknown(net, {"default"}, "network")
+            default = str(net.get("default", "deny"))
+            if default == "deny":
+                builder.deny_network()
+            elif default == "allow":
+                builder.allow_network()
+            else:
+                raise PolicyError(f"network.default must be 'deny' or 'allow', got {default!r}")
+
+        limits = data.get("limits") or {}
+        if limits:
+            _reject_unknown(
+                limits,
+                {
+                    "timeout_seconds",
+                    "calls",
+                    "rate",
+                    "cpu_seconds",
+                    "memory_mb",
+                    "max_file_size_mb",
+                    "max_processes",
+                    "max_open_files",
+                },
+                "limits",
+            )
+            if "timeout_seconds" in limits:
+                builder.timeout(float(limits["timeout_seconds"]))
+            for tool, n in (limits.get("calls") or {}).items():
+                builder.max_calls(str(tool), int(n))
+            for tool, spec in (limits.get("rate") or {}).items():
+                spec = spec or {}
+                _reject_unknown(spec, {"per_minute", "per_second"}, f"limits.rate.{tool}")
+                builder.rate_limit(
+                    str(tool),
+                    per_minute=spec.get("per_minute"),
+                    per_second=spec.get("per_second"),
+                )
+            builder.limits(
+                cpu_seconds=limits.get("cpu_seconds"),
+                memory_mb=limits.get("memory_mb"),
+                max_file_size_mb=limits.get("max_file_size_mb"),
+                max_processes=limits.get("max_processes"),
+                max_open_files=limits.get("max_open_files"),
+            )
+
+        spend = data.get("spend") or {}
+        for tool, spec in spend.items():
+            spec = spec or {}
+            _reject_unknown(spec, {"max_calls"}, f"spend.{tool}")
+            if "max_calls" not in spec:
+                raise PolicyError(f"spend.{tool} requires 'max_calls'")
+            builder.spend_cap(str(tool), int(spec["max_calls"]))
+
+        return builder.build()
+
+    # -- queries -----------------------------------------------------------
+
+    def tool_allowed(self, tool: str) -> bool:
+        """Return whether ``tool`` passes the tool allowlist (if one is set)."""
+        return self.allowed_tools is None or tool in self.allowed_tools
+
+    def to_core_json(self) -> Dict[str, Any]:
+        """Serialize the containment-relevant fields for the Rust core.
+
+        Only the parts the OS enforcement needs are included: filesystem
+        allowlists, the network decision, and resource limits. Tool allowlists,
+        rate limits, and spend caps are enforced by the Python policy tier and
+        are not part of the sandbox launch.
+        """
+        return {
+            "name": self.name,
+            "filesystem": {
+                "read": list(self.read_paths),
+                "write": list(self.write_paths),
+            },
+            "network": self.network,
+            "limits": self.limits.to_core_json(),
+        }
+
+
+def _reject_unknown(mapping: Mapping[str, Any], known: set, where: str) -> None:
+    unknown = set(mapping) - known
+    if unknown:
+        raise PolicyError(f"unknown keys in {where}: {sorted(unknown)}")
+
+
+class PolicyBuilder:
+    """Fluent builder for a :class:`Policy`.
+
+    Every method returns ``self`` so calls chain. Call :meth:`build` to produce
+    the immutable policy. Paths are normalized to absolute, symlink-resolved form
+    at build time so the resulting policy is unambiguous.
+    """
+
+    def __init__(self, name: str) -> None:
+        """Start building a policy named ``name``."""
+        self._name = name
+        self._allowed_tools: Optional[set] = None
+        self._read_paths: list = []
+        self._write_paths: list = []
+        self._network = "deny"
+        self._max_calls: Dict[str, int] = {}
+        self._rate_limits: Dict[str, RateLimit] = {}
+        self._spend_caps: Dict[str, int] = {}
+        self._timeout_seconds: Optional[float] = None
+        self._limits = ResourceLimits()
+
+    def allow_tool(self, name: str) -> "PolicyBuilder":
+        """Add ``name`` to the tool allowlist. Enables allowlist enforcement."""
+        if self._allowed_tools is None:
+            self._allowed_tools = set()
+        self._allowed_tools.add(name)
+        return self
+
+    def allow_tools(self, *names: str) -> "PolicyBuilder":
+        """Add several tool names to the allowlist."""
+        for name in names:
+            self.allow_tool(name)
+        return self
+
+    def read_paths(self, *paths: str) -> "PolicyBuilder":
+        """Allow reads under each of ``paths``. Normalized at build time."""
+        self._read_paths.extend(paths)
+        return self
+
+    def write_paths(self, *paths: str) -> "PolicyBuilder":
+        """Allow writes (and reads) under each of ``paths``."""
+        self._write_paths.extend(paths)
+        return self
+
+    def deny_network(self) -> "PolicyBuilder":
+        """Deny network access. This is the default."""
+        self._network = "deny"
+        return self
+
+    def allow_network(self) -> "PolicyBuilder":
+        """Allow network access. Prefer per-host allowlisting when it lands."""
+        self._network = "allow"
+        return self
+
+    def max_calls(self, tool: str, n: int) -> "PolicyBuilder":
+        """Cap total invocations of ``tool`` at ``n``."""
+        if n < 0:
+            raise PolicyError("max_calls must be non-negative")
+        self._max_calls[tool] = int(n)
+        return self
+
+    def rate_limit(
+        self,
+        tool: str,
+        *,
+        per_minute: Optional[int] = None,
+        per_second: Optional[int] = None,
+    ) -> "PolicyBuilder":
+        """Rate limit ``tool``. Provide exactly one of ``per_minute``/``per_second``."""
+        if (per_minute is None) == (per_second is None):
+            raise PolicyError("rate_limit requires exactly one of per_minute or per_second")
+        if per_minute is not None:
+            self._rate_limits[tool] = RateLimit(int(per_minute), 60.0)
+        else:
+            self._rate_limits[tool] = RateLimit(int(per_second), 1.0)
+        return self
+
+    def spend_cap(self, tool: str, max_calls: int) -> "PolicyBuilder":
+        """Cap invocations of a paid ``tool`` at ``max_calls`` (spend proxy)."""
+        if max_calls < 0:
+            raise PolicyError("spend_cap max_calls must be non-negative")
+        self._spend_caps[tool] = int(max_calls)
+        return self
+
+    def timeout(self, seconds: float) -> "PolicyBuilder":
+        """Set the wall-clock ceiling for a single call, in seconds."""
+        if seconds <= 0:
+            raise PolicyError("timeout seconds must be positive")
+        self._timeout_seconds = float(seconds)
+        return self
+
+    def limits(
+        self,
+        *,
+        cpu_seconds: Optional[int] = None,
+        memory_mb: Optional[int] = None,
+        max_file_size_mb: Optional[int] = None,
+        max_processes: Optional[int] = None,
+        max_open_files: Optional[int] = None,
+    ) -> "PolicyBuilder":
+        """Set OS resource limits for the containment tier (Linux)."""
+        self._limits = ResourceLimits(
+            cpu_seconds=cpu_seconds,
+            memory_mb=memory_mb,
+            max_file_size_mb=max_file_size_mb,
+            max_processes=max_processes,
+            max_open_files=max_open_files,
+        )
+        return self
+
+    def build(self) -> Policy:
+        """Produce the immutable :class:`Policy`."""
+        read = tuple(dict.fromkeys(_normalize_path(p) for p in self._read_paths))
+        # A write path implies read, so writes are also present in the read set
+        # for the policy tier. The containment tier grants read on write paths too.
+        write = tuple(dict.fromkeys(_normalize_path(p) for p in self._write_paths))
+        read_union = tuple(dict.fromkeys(read + write))
+        return Policy(
+            name=self._name,
+            allowed_tools=(frozenset(self._allowed_tools) if self._allowed_tools is not None else None),
+            read_paths=read_union,
+            write_paths=write,
+            network=self._network,
+            max_calls=dict(self._max_calls),
+            rate_limits=dict(self._rate_limits),
+            spend_caps=dict(self._spend_caps),
+            timeout_seconds=self._timeout_seconds,
+            limits=self._limits,
+        )
