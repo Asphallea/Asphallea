@@ -1,0 +1,56 @@
+[build-system]
+requires = ["hatchling>=1.18"]
+build-backend = "hatchling.build"
+
+[project]
+name = "asphallea"
+version = "0.0.1"
+description = "A security runtime that contains what your AI agent can do. Least-privilege sandboxing and a full audit trail for agent tool-execution."
+readme = "README.md"
+requires-python = ">=3.9"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [{ name = "The Asphallea Authors" }]
+keywords = [
+    "ai-agents",
+    "security",
+    "sandbox",
+    "least-privilege",
+    "landlock",
+    "seccomp",
+    "audit-log",
+    "llm",
+    "tool-calling",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Operating System :: Microsoft :: Windows",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Rust",
+    "Topic :: Security",
+]
+dependencies = [
+    "PyYAML>=6.0",
+]
+
+[project.optional-dependencies]
+langchain = ["langchain-core>=0.1"]
+dev = [
+    "pytest>=7.0",
+    "PyYAML>=6.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/asphallea/asphallea"
+Source = "https://github.com/asphallea/asphallea"
+Issues = "https://github.com/asphallea/asphallea/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["asphallea"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
