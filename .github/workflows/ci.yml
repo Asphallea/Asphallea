@@ -25,6 +25,21 @@ jobs:
       - run: pip install ".[dev]"
       - run: pytest -q
 
+  rust-quality:
+    # The core must stay formatted and lint-clean. clippy runs against the Linux
+    # target because the enforcement code is Linux-gated.
+    name: rust fmt + clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: format check
+        run: cargo fmt --manifest-path core/Cargo.toml --check
+      - name: clippy
+        run: cargo clippy --manifest-path core/Cargo.toml -- -D warnings
+
   containment-tier:
     # Linux only. This builds the Rust core (compile-checking it) and runs the
     # suite with the core binary available, so the real OS containment tests
