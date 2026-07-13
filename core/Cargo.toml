@@ -1,0 +1,40 @@
+[package]
+name = "asphallea-core"
+version = "0.0.1"
+edition = "2021"
+rust-version = "1.74"
+description = "OS-level containment launcher for Asphallea. Applies Landlock, seccomp-bpf, resource limits, and network isolation, then execs the sandboxed command."
+license = "Apache-2.0"
+repository = "https://github.com/asphallea/asphallea"
+readme = "README.md"
+
+# The launcher is a single binary invoked by the Python SDK. It sets up the
+# sandbox in itself and then execs the target command, so the restrictions are
+# inherited by the command and everything it spawns, and never touch the agent.
+[[bin]]
+name = "asphallea-run"
+path = "src/main.rs"
+
+[dependencies]
+# Cross-platform: policy and report (de)serialization.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# The real enforcement crates are Linux only. Target-gating them means the crate
+# still builds on macOS and Windows, producing a binary that honestly reports
+# containment is unavailable rather than failing to compile.
+[target.'cfg(target_os = "linux")'.dependencies]
+# Filesystem allowlist via the Landlock LSM (Linux 5.13+).
+landlock = "0.4"
+# seccomp-bpf syscall and network-family filtering. Pure Rust, no libseccomp C dep.
+seccompiler = "0.5"
+# setrlimit, unshare, prctl, fork, execvp.
+nix = { version = "0.29", features = ["resource", "sched", "process", "user"] }
+libc = "0.2"
+
+[profile.release]
+opt-level = "z"
+lto = true
+strip = true
+codegen-units = 1
+panic = "abort"
