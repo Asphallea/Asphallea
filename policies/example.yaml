@@ -1,0 +1,58 @@
+# Example Asphallea policy.
+#
+# A least-privilege policy for an agent that can read a workspace, write to one
+# output directory, search the web through a paid API, and run shell commands
+# under OS containment. Load it with:
+#
+#   from asphallea import Policy
+#   policy = Policy.from_yaml("policies/example.yaml")
+
+name: least-privilege-agent
+
+# Only these tools may be called. Every other tool is denied.
+tools:
+  allow:
+    - read_file
+    - write_file
+    - search
+    - run_shell
+
+# Filesystem allowlist. Paths are normalized to absolute, symlink-resolved form.
+# A write path also grants read. Everything outside these prefixes is denied.
+filesystem:
+  read:
+    - ./workspace
+  write:
+    - ./workspace/out
+
+# Deny all network by default. The containment tier blocks outbound sockets; the
+# policy tier denies any tool marked as network-using.
+network:
+  default: deny
+
+limits:
+  # Wall-clock ceiling for a single tool call, in seconds.
+  timeout_seconds: 30
+
+  # Per-tool total call ceilings.
+  calls:
+    search: 25
+    run_shell: 10
+
+  # Per-tool sliding-window rate limits.
+  rate:
+    search:
+      per_minute: 30
+
+  # OS resource limits for the containment tier (Linux).
+  cpu_seconds: 10
+  memory_mb: 512
+  max_file_size_mb: 100
+  max_processes: 64
+  max_open_files: 256
+
+# Spend caps model a paid tool as a maximum number of invocations. Real-time
+# dollar metering is out of scope for v0.
+spend:
+  search:
+    max_calls: 25
