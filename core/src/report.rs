@@ -12,6 +12,8 @@ use serde::Serialize;
 pub struct Report {
     /// True when filesystem and syscall enforcement are both in effect.
     pub contained: bool,
+    /// The name of the policy that was enforced, echoed for traceability.
+    pub policy: String,
     /// The OS name, always `"linux"` here.
     pub platform: String,
     /// Landlock outcome: `fully_enforced`, `partially_enforced`, `not_enforced`,

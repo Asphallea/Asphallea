@@ -23,8 +23,20 @@ use landlock::{
 /// The user's home and other data outside the policy allowlist are not here and
 /// stay blocked. Missing paths are skipped, so this is safe across distros.
 const BASELINE_READ_EXEC: &[&str] = &[
-    "/usr", "/bin", "/sbin", "/lib", "/lib64", "/etc", "/opt", "/proc",
-    "/dev/null", "/dev/zero", "/dev/full", "/dev/random", "/dev/urandom", "/dev/tty",
+    "/usr",
+    "/bin",
+    "/sbin",
+    "/lib",
+    "/lib64",
+    "/etc",
+    "/opt",
+    "/proc",
+    "/dev/null",
+    "/dev/zero",
+    "/dev/full",
+    "/dev/random",
+    "/dev/urandom",
+    "/dev/tty",
 ];
 
 /// Query the Landlock ABI version the running kernel supports.
