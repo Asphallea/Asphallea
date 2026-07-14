@@ -1,4 +1,8 @@
-# Asphallea
+<p align="center">
+  <img src="media/asphallea-logo.jpeg" alt="Asphallea" width="380">
+</p>
+
+<h1 align="center">Asphallea</h1>
 
 **A security runtime that contains what your AI agent can do.**
 
@@ -42,7 +46,8 @@ platform's own engine. Linux gets a Landlock filesystem allowlist, seccomp-bpf
 syscall and network filtering, resource limits, and network-namespace isolation.
 Windows gets an AppContainer filesystem allowlist and network deny inside a Job
 Object that bounds memory, CPU, and process count and guarantees the whole process
-tree is killed. This is the part a pure-ML competitor cannot replicate.
+tree is killed. macOS gets a Seatbelt profile that allowlists the filesystem and
+denies network. This is the part a pure-ML competitor cannot replicate.
 
 ## Install
 
@@ -221,12 +226,12 @@ partially contained.
 | --- | --- | --- | --- |
 | Policy tier: allow/deny, allowlists, rate, spend, timeout | yes | yes | yes |
 | Audit trail (JSONL) | yes | yes | yes |
-| Filesystem allowlist at the OS level | yes (Landlock) | yes (AppContainer) | planned (Seatbelt) |
-| Network deny at the OS level | yes (seccomp + netns) | yes (AppContainer) | planned (Seatbelt) |
-| Syscall filtering | yes (seccomp-bpf) | n/a | planned (Seatbelt) |
+| Filesystem allowlist at the OS level | yes (Landlock) | yes (AppContainer) | yes (Seatbelt) |
+| Network deny at the OS level | yes (seccomp + netns) | yes (AppContainer) | yes (Seatbelt) |
+| Syscall filtering | yes (seccomp-bpf) | n/a | n/a |
 | Resource limits (memory, CPU, processes) | yes (setrlimit) | yes (Job Objects) | planned |
-| Guaranteed process-tree termination | yes | yes (Job Objects) | planned |
-| Containment engine | Landlock + seccomp | AppContainer + Job Objects | none yet |
+| Guaranteed process termination | yes | yes (Job Objects) | yes (process group) |
+| Containment engine | Landlock + seccomp | AppContainer + Job Objects | Seatbelt |
 
 The policy tier enforces the tool allowlist, path allowlist, rate limits, spend
 caps, and timeouts identically on all three. The containment tier is where the OS
@@ -239,8 +244,10 @@ matters:
   inside a Job Object (memory, CPU, and process-count limits, and guaranteed
   termination of the whole process tree). A hijacked shell command cannot read the
   user's files, write outside the workspace, or reach the network.
-- **macOS** has no containment engine yet (Seatbelt is planned). It fails closed:
-  the dangerous command does not run, and the refusal names what is missing.
+- **macOS** contains with a Seatbelt profile: a deny-by-default sandbox that allows
+  the system directories a program needs to run, allows the policy's read and write
+  paths, and denies everything else including network. Resource limits are a
+  follow-up.
 
 Coverage is reported per dimension. A run proceeds contained only when the backend
 covers every dimension the policy requires; otherwise it fails closed rather than
