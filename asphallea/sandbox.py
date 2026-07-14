@@ -284,6 +284,7 @@ def run(
     tool: str = "sandbox",
     audit: Optional[AuditSink] = None,
     allow_degraded: bool = False,
+    verify_integrity: bool = True,
     timeout: Optional[float] = None,
     cwd: Optional[str] = None,
     env: Optional[Mapping[str, str]] = None,
@@ -300,6 +301,9 @@ def run(
         allow_degraded: If True and containment is unavailable, run the command
             without OS enforcement and log the degradation. If False (default),
             fail closed and raise :class:`ContainmentUnavailable`.
+        verify_integrity: If True (default), verify the core binary against the
+            bundled hash manifest before running it, and refuse a mismatch. Set
+            False only to run an unverified binary you trust for another reason.
         timeout: Wall-clock ceiling in seconds. On breach the whole process group
             is killed.
         cwd: Working directory for the command.
@@ -314,6 +318,8 @@ def run(
             limit, rate, or spend).
         ContainmentUnavailable: If OS containment is unavailable and
             ``allow_degraded`` is False.
+        IntegrityError: If the core binary fails verification against the bundled
+            manifest.
     """
     if engine is None:
         if policy is None:
@@ -371,6 +377,19 @@ def run(
             controls={"contained": False, "reason": reason},
             command=command,
         )
+
+    # Tamper check: the binary we are about to trust must match the manifest that
+    # ships with a released wheel. A swapped or patched core is rejected, fail
+    # closed, so a hijacked agent cannot neuter the enforcement by replacing it.
+    if verify_integrity and caps.core_binary is not None:
+        from . import integrity
+
+        result = integrity.verify_core(caps.core_binary)
+        if not result.ok:
+            deny = Decision.deny("integrity", result.reason)
+            _audit(audit, tool, deny, command, policy.name, tier="containment",
+                   detail={"integrity": {"method": result.method, "sha256": result.sha256}})
+            raise integrity.IntegrityError(result.reason)
 
     return _run_contained(
         command,
