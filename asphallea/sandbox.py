@@ -8,7 +8,8 @@ running platform's containment engine before it executes the command. On Linux t
 is a Landlock filesystem allowlist, a seccomp-bpf syscall and network filter,
 resource limits, and network-namespace isolation. On Windows it is an AppContainer
 filesystem allowlist and network deny inside a Job Object that bounds memory, CPU,
-and process count and guarantees the whole process tree is killed.
+and process count and guarantees the whole process tree is killed. On macOS it is a
+Seatbelt profile that allowlists the filesystem and denies network.
 
 Honesty about platforms is the whole point. Containment coverage differs per OS, so
 this module probes what the running host can actually enforce, per dimension, and
@@ -67,9 +68,9 @@ class Capabilities:
     Containment is multi-dimensional and the coverage differs per OS, so this is
     reported per dimension rather than as a single yes/no. Linux delivers all four
     (Landlock filesystem, seccomp network, resource limits, process termination).
-    Windows delivers resource limits and guaranteed process termination via Job
-    Objects today; filesystem and network allowlisting (AppContainer) are the next
-    backend. macOS has no engine yet.
+    Windows delivers filesystem and network allowlisting (AppContainer) plus
+    resource limits and guaranteed process termination (Job Objects). macOS delivers
+    filesystem and network allowlisting (Seatbelt); resource limits are a follow-up.
 
     Attributes:
         platform: The OS name, for example ``"Linux"``.
@@ -149,10 +150,7 @@ class Capabilities:
                     f"{self.platform}. Build it in core/ (cargo build --release) and "
                     "put it on PATH or set ASPHALLEA_CORE_BIN."
                 )
-            return (
-                f"no OS containment engine is available on {self.platform} yet "
-                "(macOS Seatbelt is planned)."
-            )
+            return f"no OS containment engine is available on {self.platform}."
         return f"{self.backend} on {self.platform} contains: {self.dimensions()}."
 
 
@@ -228,7 +226,7 @@ def capabilities(*, refresh: bool = False) -> Capabilities:
     binary = core_binary()
 
     caps = Capabilities(platform=system, core_binary=binary)
-    if binary is not None and system in ("Linux", "Windows"):
+    if binary is not None and system in ("Linux", "Windows", "Darwin"):
         caps = _probe(binary, system)
 
     _CAPS_CACHE = caps
@@ -265,11 +263,11 @@ def _probe(binary: str, system: str) -> Capabilities:
             version=data.get("version"),
         )
 
-    # Windows: the Job Object backend reports its dimensions directly.
+    # Windows and macOS: the backend reports its dimensions directly.
     return Capabilities(
         platform=system,
         core_binary=binary,
-        backend=str(data.get("backend", "windows-job-object")),
+        backend=str(data.get("backend", "unknown")),
         filesystem_sandbox=bool(data.get("filesystem_sandbox", False)),
         network_sandbox=bool(data.get("network_sandbox", False)),
         resource_limits=bool(data.get("resource_limits", False)),

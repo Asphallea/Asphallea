@@ -116,3 +116,32 @@ jobs:
         env:
           ASPHALLEA_CORE_BIN: ${{ github.workspace }}\core\target\release\asphallea-run.exe
         run: python examples/injection_demo.py
+
+  containment-macos:
+    # Builds the macOS core and runs the suite with the Seatbelt backend available,
+    # so the macOS containment tests execute: reads outside the allowlist blocked,
+    # the workspace allowed, out-of-bounds writes blocked.
+    name: containment tier (macos)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - name: clippy (macos target)
+        run: cargo clippy --manifest-path core/Cargo.toml -- -D warnings
+      - name: build the core
+        run: cargo build --release --manifest-path core/Cargo.toml
+      - name: install the SDK
+        run: pip install ".[dev]"
+      - name: run tests with Seatbelt containment
+        env:
+          ASPHALLEA_CORE_BIN: ${{ github.workspace }}/core/target/release/asphallea-run
+        run: pytest -q
+      - name: run the injection demo
+        env:
+          ASPHALLEA_CORE_BIN: ${{ github.workspace }}/core/target/release/asphallea-run
+        run: python examples/injection_demo.py

@@ -21,10 +21,10 @@
 
 // Some policy and report fields are read only by a subset of the OS backends.
 // They are part of the wire format, so allow dead_code across platforms.
-#[cfg(any(target_os = "linux", target_os = "windows"))]
+#[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
 #[allow(dead_code)]
 mod policy;
-#[cfg(any(target_os = "linux", target_os = "windows"))]
+#[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
 #[allow(dead_code)]
 mod report;
 
@@ -42,8 +42,11 @@ mod win_appcontainer;
 #[cfg(target_os = "windows")]
 mod win_contain;
 
+#[cfg(target_os = "macos")]
+mod macos_sandbox;
+
 /// A parsed command invocation, shared by the OS backends.
-#[cfg(any(target_os = "linux", target_os = "windows"))]
+#[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
 struct Invocation {
     policy_path: String,
     report_path: Option<String>,
@@ -55,7 +58,7 @@ struct Invocation {
 
 /// Parse the CLI up to the `--` separator. Returns `Err(exit_code)` on a usage
 /// error, after printing a message.
-#[cfg(any(target_os = "linux", target_os = "windows"))]
+#[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
 fn parse_invocation(args: &[String]) -> Result<Invocation, i32> {
     let mut policy_path: Option<String> = None;
     let mut report_path: Option<String> = None;
@@ -104,7 +107,7 @@ fn parse_invocation(args: &[String]) -> Result<Invocation, i32> {
     })
 }
 
-#[cfg(any(target_os = "linux", target_os = "windows"))]
+#[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
 fn load_policy(path: &str) -> policy::Policy {
     let text = std::fs::read_to_string(path).unwrap_or_else(|e| {
         eprintln!("asphallea-run: cannot read policy {path}: {e}");
@@ -296,9 +299,50 @@ fn print_probe_windows() {
 
 // ----------------------------------------------------- Other platforms (macOS)
 
-// No containment engine yet on this OS. The SDK never invokes this binary here,
-// but if someone does, be explicit rather than pretend containment.
-#[cfg(not(any(target_os = "linux", target_os = "windows")))]
+// ---------------------------------------------------------------- macOS engine
+
+#[cfg(target_os = "macos")]
+fn main() {
+    use report::Report;
+    use std::process::exit;
+
+    let args: Vec<String> = std::env::args().collect();
+    if args.iter().any(|a| a == "--probe") {
+        print_probe_macos();
+        return;
+    }
+
+    let inv = parse_invocation(&args).unwrap_or_else(|c| exit(c));
+    let policy = load_policy(&inv.policy_path);
+
+    let mut report = Report {
+        platform: "macos".to_string(),
+        backend: "macos-seatbelt".to_string(),
+        policy: policy.name.clone(),
+        ..Default::default()
+    };
+
+    let code = macos_sandbox::run(&policy, &inv.command, &mut report, &inv.report_path);
+    exit(code);
+}
+
+#[cfg(target_os = "macos")]
+fn print_probe_macos() {
+    // Seatbelt (filesystem + network) is verified by checking for sandbox-exec.
+    // Resource limits are not expressed by Seatbelt yet; termination is handled by
+    // the parent process group.
+    let sb = macos_sandbox::available();
+    println!(
+        "{{\"version\":\"{}\",\"platform\":\"macos\",\"backend\":\"macos-seatbelt\",\
+         \"resource_limits\":false,\"process_kill\":true,\"filesystem_sandbox\":{sb},\
+         \"network_sandbox\":{sb}}}",
+        env!("CARGO_PKG_VERSION")
+    );
+}
+
+// No containment engine on this OS. The SDK never invokes this binary here, but if
+// someone does, be explicit rather than pretend containment.
+#[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.iter().any(|a| a == "--probe") {
@@ -310,7 +354,7 @@ fn main() {
         return;
     }
     eprintln!(
-        "asphallea-run: no OS containment engine for {} yet (macOS Seatbelt is planned).",
+        "asphallea-run: no OS containment engine for {} yet.",
         std::env::consts::OS
     );
     std::process::exit(3);
