@@ -26,6 +26,7 @@ from asphallea import (
 CAPS = capabilities()
 IS_LINUX = platform.system() == "Linux"
 IS_WINDOWS = platform.system() == "Windows"
+IS_MACOS = platform.system() == "Darwin"
 
 # The sample policy below requires filesystem and network containment. It is fully
 # covered only by a complete backend (Linux Landlock + seccomp).
@@ -41,6 +42,10 @@ linux_contained = pytest.mark.skipif(
 windows_contained = pytest.mark.skipif(
     not (IS_WINDOWS and CAPS.can_contain),
     reason="requires the Windows Job Object backend",
+)
+macos_contained = pytest.mark.skipif(
+    not (IS_MACOS and CAPS.can_contain),
+    reason="requires the macOS Seatbelt backend",
 )
 
 
@@ -239,3 +244,45 @@ def test_windows_probe_reports_backend():
     assert caps.network_sandbox is True
     assert caps.resource_limits is True
     assert caps.process_kill is True
+
+
+# --- Seatbelt containment (macOS) ------------------------------------------
+
+
+@macos_contained
+def test_macos_contained_allows_workspace_read(tmp_path):
+    policy = base_policy(tmp_path)
+    ws_file = str(tmp_path / "ws" / "notes.txt")
+    with open(ws_file, "w") as fh:
+        fh.write("PUBLIC-mac")
+    result = sandbox.run(["/bin/cat", ws_file], policy=policy, tool="run_shell")
+    assert result.contained is True
+    assert "PUBLIC-mac" in result.stdout
+
+
+@macos_contained
+def test_macos_contained_blocks_read_outside(tmp_path):
+    policy = base_policy(tmp_path)
+    secret = str(tmp_path / "secret.txt")
+    with open(secret, "w") as fh:
+        fh.write("TOPSECRET-mac")
+    result = sandbox.run(["/bin/cat", secret], policy=policy, tool="run_shell")
+    assert result.contained is True
+    assert result.returncode != 0
+    assert "TOPSECRET-mac" not in result.stdout
+
+
+@macos_contained
+def test_macos_contained_blocks_write_outside(tmp_path):
+    policy = base_policy(tmp_path)
+    target = str(tmp_path / "escape.txt")
+    sandbox.run(["/bin/sh", "-c", f"echo pwned > {target}"], policy=policy, tool="run_shell")
+    assert not os.path.exists(target)
+
+
+@macos_contained
+def test_macos_probe_reports_backend():
+    caps = capabilities(refresh=True)
+    assert caps.backend == "macos-seatbelt"
+    assert caps.filesystem_sandbox is True
+    assert caps.network_sandbox is True

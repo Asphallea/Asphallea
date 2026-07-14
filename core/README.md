@@ -29,6 +29,13 @@ launched it is never restricted.
   CPU-time, and process-count limits, and `KILL_ON_JOB_CLOSE` so the whole process
   tree dies with the launcher.
 
+## What it enforces (macOS)
+
+- **Filesystem allowlist and network deny** with a Seatbelt profile applied by
+  `sandbox-exec`. A deny-by-default profile allows the system directories a program
+  needs to run, allows the policy's read and write paths, and denies everything
+  else including network. Resource limits are a follow-up.
+
 ## Build
 
 ```sh
