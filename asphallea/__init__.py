@@ -45,6 +45,7 @@ from .audit import (
 )
 from .engine import Decision, Engine
 from .guard import PolicyTimeout, PolicyViolation, guard
+from .integrity import IntegrityError, IntegrityResult, verify_core
 from .policy import Policy, PolicyBuilder, PolicyError, RateLimit, ResourceLimits
 from .sandbox import Capabilities, ContainmentUnavailable, SandboxResult, capabilities
 
@@ -79,4 +80,8 @@ __all__ = [
     "Capabilities",
     "SandboxResult",
     "ContainmentUnavailable",
+    # integrity
+    "IntegrityError",
+    "IntegrityResult",
+    "verify_core",
 ]
