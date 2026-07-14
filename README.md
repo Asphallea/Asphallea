@@ -4,6 +4,8 @@
 
 <h1 align="center">Asphallea</h1>
 
+<p align="center"><em>A Genovo Technologies company</em></p>
+
 **A security runtime that contains what your AI agent can do.**
 
 Least-privilege sandboxing and a full audit trail for agent tool-execution, so a
