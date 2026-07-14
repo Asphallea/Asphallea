@@ -1,0 +1,108 @@
+name: release
+
+# Builds one platform wheel per OS, each bundling that OS's prebuilt core binary,
+# code-signs the binary when signing secrets are configured, and publishes to PyPI.
+# Trigger by pushing a version tag (v0.0.1) or manually.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+jobs:
+  build-wheels:
+    name: wheel (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    # Signing secrets. Empty when unset; the sign steps skip and the wheel ships
+    # unsigned (still hash-verified). Configure these in the repo secrets to sign.
+    env:
+      WINDOWS_CERT_PFX_BASE64: ${{ secrets.WINDOWS_CERT_PFX_BASE64 }}
+      WINDOWS_CERT_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
+      MACOS_CERT_P12_BASE64: ${{ secrets.MACOS_CERT_P12_BASE64 }}
+      MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+      MACOS_SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Build the core (release)
+        run: cargo build --release --manifest-path core/Cargo.toml
+
+      - name: Sign the core (Windows Authenticode)
+        if: runner.os == 'Windows' && env.WINDOWS_CERT_PFX_BASE64 != ''
+        shell: pwsh
+        run: |
+          $pfx = [System.IO.Path]::GetTempFileName() + ".pfx"
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:WINDOWS_CERT_PFX_BASE64))
+          & signtool sign /f $pfx /p $env:WINDOWS_CERT_PASSWORD /fd sha256 `
+            /tr http://timestamp.digicert.com /td sha256 `
+            core/target/release/asphallea-run.exe
+          Remove-Item $pfx
+
+      - name: Sign the core (macOS codesign + notarize)
+        if: runner.os == 'macOS' && env.MACOS_CERT_P12_BASE64 != ''
+        run: |
+          echo "$MACOS_CERT_P12_BASE64" | base64 -d > cert.p12
+          security create-keychain -p tmp build.keychain
+          security default-keychain -s build.keychain
+          security unlock-keychain -p tmp build.keychain
+          security import cert.p12 -k build.keychain -P "$MACOS_CERT_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s -k tmp build.keychain
+          codesign --force --options runtime --timestamp \
+            --sign "$MACOS_SIGN_IDENTITY" core/target/release/asphallea-run
+          rm cert.p12
+          # Notarization (notarytool) goes here once an Apple ID / API key is set.
+
+      # Linux binaries have no standard Authenticode-style signing; the bundled
+      # SHA-256 manifest is the integrity anchor there. GPG-signing the wheel is an
+      # option in the publish step.
+
+      - name: Bundle the signed core into the package
+        run: python scripts/bundle_core.py
+
+      - name: Build the wheel
+        run: |
+          python -m pip install --upgrade build
+          python -m build --wheel
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheel-${{ matrix.os }}
+          path: dist/*.whl
+
+  sdist:
+    name: sdist
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: python -m pip install --upgrade build
+      - run: python -m build --sdist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sdist
+          path: dist/*.tar.gz
+
+  publish:
+    name: publish to PyPI
+    needs: [build-wheels, sdist]
+    runs-on: ubuntu-latest
+    # PyPI Trusted Publishing (OIDC): configure the publisher on PyPI, no token.
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist

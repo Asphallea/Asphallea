@@ -17,6 +17,9 @@ htmlcov/
 core/target/
 **/*.rs.bk
 
+# Bundled core binary (produced at wheel-build time, shipped in wheels not source)
+asphallea/_core/
+
 # Local audit artifacts and scratch
 *.jsonl
 !policies/*.jsonl

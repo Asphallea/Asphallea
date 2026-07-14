@@ -51,6 +51,15 @@ Issues = "https://github.com/asphallea/asphallea/issues"
 
 [tool.hatch.build.targets.wheel]
 packages = ["asphallea"]
+# The release pipeline drops the prebuilt, signed core binary and its checksum
+# manifest into asphallea/_core/ (via scripts/bundle_core.py). That directory is
+# git-ignored, so force-include it here so it ships in the wheel.
+artifacts = ["asphallea/_core/**"]
+
+# When a core binary is bundled, hatch_build.py marks the wheel platform-specific
+# so each per-OS release wheel gets the right tag. A source build stays pure.
+[tool.hatch.build.targets.wheel.hooks.custom]
+path = "hatch_build.py"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

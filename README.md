@@ -55,9 +55,15 @@ denies network. This is the part a pure-ML competitor cannot replicate.
 pip install asphallea
 ```
 
-That installs the pure-Python SDK and the policy tier, which works everywhere. The
-containment tier needs the Rust core binary, built separately (see below). No Rust
-toolchain is required to use the policy tier.
+The release wheels are platform specific and bundle a prebuilt, code-signed
+`asphallea-run` core binary, so there is no Rust toolchain to install and nothing to
+compile. Before it runs that binary, the SDK verifies its SHA-256 against a manifest
+shipped inside the wheel and refuses a binary that does not match, so a swapped or
+patched core is rejected and the run fails closed. See
+[`SECURITY.md`](SECURITY.md) for the trust model.
+
+To build the core yourself instead, see [`core/`](core) and point the SDK at your
+binary with `ASPHALLEA_CORE_BIN`.
 
 ## Quickstart
 
