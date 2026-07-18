@@ -158,17 +158,19 @@ from asphallea import capabilities
 print(capabilities().explain())
 ```
 
-## The injection demo
+## The demo
 
-[`examples/injection_demo.py`](examples/injection_demo.py) is the whole pitch in one
-file. A small agent with a shell tool and a file tool is given a prompt-injected
-instruction that tries to steal a secret and delete a directory outside its
-workspace. It runs twice: once unguarded, where the attack succeeds against a
-throwaway sandbox directory, and once wrapped in Asphallea, where both actions are
-denied and contained, with the audit log printed.
+[`examples/demo.py`](examples/demo.py) is the whole pitch in one file. An agent is
+connected to a filesystem tool server over MCP and reads a page carrying an injected
+instruction that tells it to steal a credential and delete the production database.
+It runs twice: once unguarded, where the attack succeeds against throwaway temp
+files, and once with the MCP session wrapped in one line, where both tool-calls are
+BLOCKED by policy before they run, the database is intact, the credential is never
+read, and the audit log is printed. If the OS containment core is present, it adds a
+run showing a shell command contained at the OS level too.
 
 ```sh
-python examples/injection_demo.py
+python examples/demo.py
 ```
 
 ## Policy model
