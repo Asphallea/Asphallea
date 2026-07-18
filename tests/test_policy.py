@@ -238,6 +238,77 @@ def test_from_dict_rejects_unknown_tools_key():
         Policy.from_dict({"name": "x", "tools": {"allowed": ["a"]}})
 
 
+# --- network host rules -----------------------------------------------------
+
+
+def test_network_allowed_default_deny():
+    p = Policy.builder("p").deny_network().build()
+    assert p.network_allowed("https://example.com") is False
+    assert p.network_allowed(None) is False  # forced-network, unknown host
+
+
+def test_network_allowed_default_allow():
+    p = Policy.builder("p").allow_network().build()
+    assert p.network_allowed("https://example.com") is True
+    assert p.network_allowed(None) is True
+
+
+def test_network_allow_hosts_exact_and_subdomain():
+    p = Policy.builder("p").allow_hosts("example.com").build()
+    assert p.network_allowed("https://example.com/x") is True
+    assert p.network_allowed("https://api.example.com") is True
+    assert p.network_allowed("https://evil.com") is False
+    assert p.network_allowed("https://notexample.com") is False
+
+
+def test_network_deny_hosts_win():
+    p = Policy.builder("p").allow_network().deny_hosts("attacker.example").build()
+    assert p.network_allowed("https://ok.com") is True
+    assert p.network_allowed("https://attacker.example/x") is False
+
+
+def test_network_hosts_normalize_urls_and_case():
+    # A URL or mixed-case host as a rule is reduced to a comparable host.
+    p = Policy.builder("p").allow_hosts("https://API.Example.com/ignored").build()
+    assert p.network_allow_hosts == frozenset({"api.example.com"})
+    assert p.network_allowed("http://api.example.com:8080/y") is True
+
+
+def test_from_yaml_network_host_rules(tmp_path):
+    yaml_text = """
+name: net
+network:
+  default: deny
+  allow_hosts: [api.example.com, docs.python.org]
+  deny_hosts: [api.example.com/secret]
+tools:
+  args:
+    web.get: { network: url }
+"""
+    f = tmp_path / "p.yaml"
+    f.write_text(yaml_text, encoding="utf-8")
+    p = Policy.from_yaml(str(f))
+    assert "api.example.com" in p.network_allow_hosts
+    assert "docs.python.org" in p.network_allow_hosts
+    assert p.network_allowed("https://docs.python.org/3/") is True
+    assert p.network_allowed("https://elsewhere.com") is False
+
+
+def test_from_dict_rejects_unknown_network_key():
+    with pytest.raises(PolicyError):
+        Policy.from_dict({"name": "x", "network": {"allowlist": []}})
+
+
+def test_network_host_helpers():
+    from asphallea.policy import host_matches, network_host
+
+    assert network_host("https://a.b.com:443/p") == "a.b.com"
+    assert network_host("a.b.com:80") == "a.b.com"
+    assert network_host("A.B.com") == "a.b.com"
+    assert host_matches("api.example.com", "example.com") is True
+    assert host_matches("notexample.com", "example.com") is False
+
+
 def test_from_dict_requires_name():
     with pytest.raises(PolicyError):
         Policy.from_dict({"tools": {"allow": ["a"]}})

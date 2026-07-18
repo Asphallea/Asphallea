@@ -21,6 +21,7 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Mapping, Optional, Tuple
+from urllib.parse import urlsplit
 
 __all__ = [
     "Policy",
@@ -28,6 +29,8 @@ __all__ = [
     "RateLimit",
     "ResourceLimits",
     "ToolArgs",
+    "network_host",
+    "host_matches",
     "PolicyError",
 ]
 
@@ -93,6 +96,34 @@ class ResourceLimits:
         return out
 
 
+def network_host(value: Any) -> str:
+    """Extract a comparable hostname from a URL or ``host[:port]`` string.
+
+    Pure string parsing, no DNS and no network. ``"https://api.example.com/x"`` and
+    ``"api.example.com:443"`` both yield ``"api.example.com"``. Lowercased so
+    comparison is case-insensitive.
+    """
+    if value is None:
+        return ""
+    text = str(value).strip()
+    if "://" in text:
+        host = urlsplit(text).hostname or ""
+    else:
+        host = text.split("/", 1)[0].rsplit("@", 1)[-1].split(":", 1)[0]
+    return host.lower()
+
+
+def host_matches(target: str, rule: str) -> bool:
+    """Whether ``target`` host is covered by ``rule``: exact host or a subdomain.
+
+    Rule ``example.com`` matches ``example.com`` and ``api.example.com`` but not
+    ``notexample.com``. Both are expected already normalized by :func:`network_host`.
+    """
+    if not target or not rule:
+        return False
+    return target == rule or target.endswith("." + rule)
+
+
 def _as_names(value: Any) -> Tuple[str, ...]:
     """Coerce an argument-name spec (``"path"`` or ``["src", "dst"]``) to a tuple."""
     if value is None:
@@ -145,9 +176,13 @@ class Policy:
         read_paths: Absolute, normalized prefixes a tool may read from.
         write_paths: Absolute, normalized prefixes a tool may write to. A write
             path also grants read.
-        network: ``"deny"`` or ``"allow"``. When ``"deny"``, a tool declared as
-            network-using is denied at the policy tier, and the containment tier
-            blocks outbound sockets at the syscall layer.
+        network: The default network decision, ``"deny"`` or ``"allow"``, applied
+            to a declared network target whose host matches no explicit rule.
+        network_allow_hosts: Hosts allowed even when the default is deny. A rule
+            matches the host exactly or as a parent domain (``example.com`` covers
+            ``api.example.com``).
+        network_deny_hosts: Hosts denied even when the default is allow. A denial
+            wins over an allow rule.
         max_calls: Per-tool ceiling on total invocations.
         rate_limits: Per-tool sliding-window rate limit.
         spend_caps: Per-tool ceiling on invocations of a paid tool. Modeled as a
@@ -163,6 +198,8 @@ class Policy:
     read_paths: Tuple[str, ...] = ()
     write_paths: Tuple[str, ...] = ()
     network: str = "deny"
+    network_allow_hosts: frozenset = frozenset()
+    network_deny_hosts: frozenset = frozenset()
     max_calls: Mapping[str, int] = field(default_factory=dict)
     rate_limits: Mapping[str, RateLimit] = field(default_factory=dict)
     spend_caps: Mapping[str, int] = field(default_factory=dict)
@@ -245,7 +282,7 @@ class Policy:
 
         net = data.get("network") or {}
         if net:
-            _reject_unknown(net, {"default"}, "network")
+            _reject_unknown(net, {"default", "allow_hosts", "deny_hosts"}, "network")
             default = str(net.get("default", "deny"))
             if default == "deny":
                 builder.deny_network()
@@ -253,6 +290,8 @@ class Policy:
                 builder.allow_network()
             else:
                 raise PolicyError(f"network.default must be 'deny' or 'allow', got {default!r}")
+            builder.allow_hosts(*(net.get("allow_hosts") or []))
+            builder.deny_hosts(*(net.get("deny_hosts") or []))
 
         limits = data.get("limits") or {}
         if limits:
@@ -316,6 +355,22 @@ class Policy:
         """Return the declared argument mapping for ``tool`` (empty if none)."""
         return self.tool_args.get(tool, ToolArgs())
 
+    def network_allowed(self, target: Optional[str]) -> bool:
+        """Whether a network ``target`` (URL or host) is permitted.
+
+        A denied host wins, then an allowed host, then the default. ``target`` of
+        ``None`` means "uses the network, host unknown", decided by the default
+        alone. Deterministic and offline: this only parses the string.
+        """
+        if target is None:
+            return self.network == "allow"
+        host = network_host(target)
+        if any(host_matches(host, rule) for rule in self.network_deny_hosts):
+            return False
+        if any(host_matches(host, rule) for rule in self.network_allow_hosts):
+            return True
+        return self.network == "allow"
+
     def to_core_json(self) -> Dict[str, Any]:
         """Serialize the containment-relevant fields for the Rust core.
 
@@ -358,6 +413,8 @@ class PolicyBuilder:
         self._read_paths: list = []
         self._write_paths: list = []
         self._network = "deny"
+        self._network_allow_hosts: set = set()
+        self._network_deny_hosts: set = set()
         self._max_calls: Dict[str, int] = {}
         self._rate_limits: Dict[str, RateLimit] = {}
         self._spend_caps: Dict[str, int] = {}
@@ -440,8 +497,24 @@ class PolicyBuilder:
         return self
 
     def allow_network(self) -> "PolicyBuilder":
-        """Allow network access. Prefer per-host allowlisting when it lands."""
+        """Allow network access by default. Narrow it with :meth:`deny_hosts`."""
         self._network = "allow"
+        return self
+
+    def allow_hosts(self, *hosts: str) -> "PolicyBuilder":
+        """Allow these hosts even when the default is deny.
+
+        A host rule matches exactly or as a parent domain, so ``example.com``
+        permits ``api.example.com``. A URL is accepted and reduced to its host.
+        """
+        for host in hosts:
+            self._network_allow_hosts.add(network_host(host))
+        return self
+
+    def deny_hosts(self, *hosts: str) -> "PolicyBuilder":
+        """Deny these hosts even when the default is allow. A denial wins."""
+        for host in hosts:
+            self._network_deny_hosts.add(network_host(host))
         return self
 
     def max_calls(self, tool: str, n: int) -> "PolicyBuilder":
@@ -512,6 +585,8 @@ class PolicyBuilder:
             allowed_tools=(frozenset(self._allowed_tools) if self._allowed_tools is not None else None),
             denied_tools=frozenset(self._denied_tools),
             tool_args=dict(self._tool_args),
+            network_allow_hosts=frozenset(h for h in self._network_allow_hosts if h),
+            network_deny_hosts=frozenset(h for h in self._network_deny_hosts if h),
             read_paths=read_union,
             write_paths=write,
             network=self._network,
