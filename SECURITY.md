@@ -64,6 +64,5 @@ The hash manifest catches corruption and naive swaps. Code signing raises the ba
 ## Reporting a vulnerability
 
 If you find a way to escape the containment, bypass the integrity check, or make the
-audit log lie, please report it privately to security@asphallea.dev (placeholder;
-set your real address) rather than opening a public issue. We will acknowledge and
-work a fix before disclosure.
+audit log lie, please report it privately to security@asphallea.dev rather than
+opening a public issue. We will acknowledge and work a fix before disclosure.
