@@ -14,8 +14,9 @@
 
 use crate::policy::Policy;
 use crate::report::Report;
+use std::io::Write;
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
 
@@ -59,7 +60,17 @@ pub fn run(
         return 3;
     }
 
-    let profile = build_profile(policy);
+    // The sandboxed process inherits stdout/stderr, but under a deny-default
+    // profile those pipes have no filesystem path to grant, so its output would be
+    // lost. Route output through files in an allowlisted capture directory (files
+    // have paths the profile can grant), then forward them afterward.
+    let capture = std::env::temp_dir().join(format!("asphallea-cap-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&capture);
+    let capture = std::fs::canonicalize(&capture).unwrap_or(capture);
+    let out_path = capture.join("stdout");
+    let err_path = capture.join("stderr");
+
+    let profile = build_profile(policy, &[capture.to_string_lossy().as_ref()]);
     report.network = if policy.network_denied() {
         "denied (Seatbelt profile)".to_string()
     } else {
@@ -70,21 +81,48 @@ pub fn run(
     // The command runs as a child, so the report is safe to write now.
     write_report(report_path, report);
 
+    let (out_file, err_file) = match (
+        std::fs::File::create(&out_path),
+        std::fs::File::create(&err_path),
+    ) {
+        (Ok(o), Ok(e)) => (o, e),
+        _ => {
+            eprintln!("asphallea-run: could not open capture files under {capture:?}");
+            let _ = std::fs::remove_dir_all(&capture);
+            return 127;
+        }
+    };
+
     let mut cmd = Command::new(SANDBOX_EXEC);
     cmd.arg("-p").arg(&profile).arg("--");
     for arg in command {
         cmd.arg(arg);
     }
-    match cmd.status() {
+    cmd.stdout(Stdio::from(out_file));
+    cmd.stderr(Stdio::from(err_file));
+
+    let code = match cmd.status() {
         Ok(status) => status.code().unwrap_or(1),
         Err(e) => {
             eprintln!("asphallea-run: could not launch sandbox-exec: {e}");
             127
         }
+    };
+
+    // Forward the captured output to our own streams, which the SDK reads.
+    if let Ok(bytes) = std::fs::read(&out_path) {
+        let _ = std::io::stdout().write_all(&bytes);
+        let _ = std::io::stdout().flush();
     }
+    if let Ok(bytes) = std::fs::read(&err_path) {
+        let _ = std::io::stderr().write_all(&bytes);
+        let _ = std::io::stderr().flush();
+    }
+    let _ = std::fs::remove_dir_all(&capture);
+    code
 }
 
-fn build_profile(policy: &Policy) -> String {
+fn build_profile(policy: &Policy, extra_writes: &[&str]) -> String {
     let mut p = String::new();
     p.push_str("(version 1)\n");
     p.push_str("(deny default)\n");
@@ -115,6 +153,14 @@ fn build_profile(policy: &Policy) -> String {
         ));
     }
     for path in &policy.filesystem.write {
+        p.push_str(&format!(
+            "(allow file-read* file-write* (subpath {}))\n",
+            sbpl_string(path)
+        ));
+    }
+    // The stdout/stderr capture directory (see run) is writable so the command's
+    // output can be persisted and forwarded.
+    for path in extra_writes {
         p.push_str(&format!(
             "(allow file-read* file-write* (subpath {}))\n",
             sbpl_string(path)
