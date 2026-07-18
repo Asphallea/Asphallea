@@ -41,10 +41,15 @@ def test_allowlist_denies_unlisted():
     assert p.tool_allowed("unknown") is False
 
 
-def test_paths_normalized_absolute(tmp_path):
-    rel = os.path.relpath(str(tmp_path))
-    p = Policy.builder("p").read_paths(rel).build()
-    assert p.read_paths[0] == os.path.realpath(str(tmp_path))
+def test_paths_normalized_absolute(tmp_path, monkeypatch):
+    # A relative path must be normalized to an absolute, symlink-resolved one.
+    # chdir into tmp_path so the relative path resolves there; this also avoids
+    # os.path.relpath raising across drives (Windows CI checks out on D:, temp on C:).
+    sub = tmp_path / "sub"
+    sub.mkdir()
+    monkeypatch.chdir(tmp_path)
+    p = Policy.builder("p").read_paths("sub").build()
+    assert p.read_paths[0] == os.path.realpath(str(sub))
 
 
 def test_write_path_implies_read(tmp_path):
