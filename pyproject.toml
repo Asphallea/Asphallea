@@ -45,9 +45,9 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/asphallea/asphallea"
-Source = "https://github.com/asphallea/asphallea"
-Issues = "https://github.com/asphallea/asphallea/issues"
+Homepage = "https://github.com/Asphallea/Asphallea"
+Source = "https://github.com/Asphallea/Asphallea"
+Issues = "https://github.com/Asphallea/Asphallea/issues"
 
 [tool.hatch.build.targets.wheel]
 packages = ["asphallea"]
