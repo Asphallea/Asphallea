@@ -137,6 +137,21 @@ jobs:
         run: cargo build --release --manifest-path core/Cargo.toml
       - name: install the SDK
         run: pip install ".[dev]"
+      - name: DEBUG seatbelt (temporary)
+        continue-on-error: true
+        run: |
+          set +e
+          echo "sandbox-exec: $(command -v sandbox-exec)"
+          WS="$RUNNER_TEMP/dbg_ws"; mkdir -p "$WS"; echo "HELLO-SEATBELT" > "$WS/f.txt"
+          echo "== 1. raw allow-default =="
+          sandbox-exec -p '(version 1)(allow default)' /bin/cat "$WS/f.txt"; echo "exit=$?"
+          echo "== 2. raw deny-default + read allow =="
+          sandbox-exec -p "(version 1)(deny default)(allow process*)(allow sysctl-read)(allow mach*)(allow file-read* (subpath \"$WS\") (subpath \"/usr\") (subpath \"/System\") (subpath \"/bin\") (subpath \"/private/var/db/dyld\"))" /bin/cat "$WS/f.txt"; echo "exit=$?"
+          echo "== 3. our binary =="
+          BIN="$GITHUB_WORKSPACE/core/target/release/asphallea-run"
+          printf '{"name":"d","filesystem":{"read":["%s"],"write":["%s"]},"network":"deny","limits":{}}' "$WS" "$WS" > "$RUNNER_TEMP/pol.json"
+          "$BIN" --policy "$RUNNER_TEMP/pol.json" --report "$RUNNER_TEMP/rep.json" -- /bin/cat "$WS/f.txt"; echo "exit=$?"
+          echo "== report =="; cat "$RUNNER_TEMP/rep.json"; echo
       - name: run tests with Seatbelt containment
         env:
           ASPHALLEA_CORE_BIN: ${{ github.workspace }}/core/target/release/asphallea-run
