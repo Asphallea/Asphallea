@@ -140,21 +140,26 @@ fn build_profile(policy: &Policy, extra_writes: &[&str]) -> String {
     // allowlists below.
     p.push_str("(allow file-read-data file-write-data (require-not (subpath \"/\")))\n");
 
+    // file-map-executable is required (macOS 11+) to mmap dylibs and the dyld
+    // shared cache with exec permission. Without it, dyld aborts the process
+    // (SIGABRT) before it runs, under deny-default. So system paths grant it.
     for base in SYSTEM_READ {
         p.push_str(&format!(
-            "(allow file-read* (subpath {}))\n",
+            "(allow file-read* file-map-executable (subpath {}))\n",
             sbpl_string(base)
         ));
     }
+    // Read paths also grant map-executable so a permitted interpreter or binary in
+    // the workspace can be run.
     for path in &policy.filesystem.read {
         p.push_str(&format!(
-            "(allow file-read* (subpath {}))\n",
+            "(allow file-read* file-map-executable (subpath {}))\n",
             sbpl_string(path)
         ));
     }
     for path in &policy.filesystem.write {
         p.push_str(&format!(
-            "(allow file-read* file-write* (subpath {}))\n",
+            "(allow file-read* file-write* file-map-executable (subpath {}))\n",
             sbpl_string(path)
         ));
     }
