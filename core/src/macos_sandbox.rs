@@ -39,7 +39,11 @@ const SYSTEM_READ: &[&str] = &[
     "/etc",
     "/private/etc",
     "/private/var/db",
-    "/private/var/folders",
+    // /private/var/folders is deliberately NOT listed: it holds the per-user temp
+    // and cache tree, which is where a policy's own workspace (and any sibling files
+    // outside it) live. Granting it wholesale would let a command read files outside
+    // the policy allowlist. The loader does not need it, and the launcher's own
+    // output-capture directory under temp is granted explicitly (see run).
     "/opt",
     "/Applications",
 ];
@@ -154,6 +158,12 @@ fn build_profile(policy: &Policy, extra_writes: &[&str]) -> String {
     // gated by the file-read* allowlist below, so data outside the policy paths stays
     // unreadable (you cannot map what you cannot open).
     p.push_str("(allow file-map-executable)\n");
+
+    // The loader reads the root directory node itself during startup; without this
+    // the process is denied `file-read-data /` and aborts (SIGABRT) before it runs.
+    // `literal` matches only the exact path "/", i.e. the root directory entry, not
+    // anything under it, so files outside the policy's read paths stay unreadable.
+    p.push_str("(allow file-read* (literal \"/\"))\n");
 
     for base in SYSTEM_READ {
         p.push_str(&format!(
