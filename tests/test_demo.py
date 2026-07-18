@@ -76,6 +76,20 @@ def test_decision_is_deterministic_across_runs():
         demo._rmtree(arena["root"])
 
 
+def test_quickstart_script_runs_clean():
+    # The quickstart mirrors the README, so if it runs clean the README's headline
+    # API is real.
+    proc = subprocess.run(
+        [sys.executable, str(ROOT / "examples" / "quickstart.py")],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert proc.returncode == 0, f"quickstart exited {proc.returncode}\n{proc.stderr}"
+    assert "BLOCKED by policy" in proc.stdout
+    assert "protected file still present: True" in proc.stdout
+
+
 def test_demo_script_runs_clean_end_to_end():
     proc = subprocess.run(
         [sys.executable, str(DEMO_PATH)],

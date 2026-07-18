@@ -6,15 +6,19 @@
 
 <p align="center"><em>A Genovo Technologies company</em></p>
 
-**A security runtime that contains what your AI agent can do.**
+**A security runtime that secures what your AI agent does, not what it says.**
 
-Least-privilege sandboxing and a full audit trail for agent tool-execution, so a
-hijacked agent cannot wreck your systems.
+Asphallea sits between an agent and its tools (shell, filesystem, network, and MCP
+tool-calls) and blocks disallowed actions by declarative policy. Enforcement is
+deterministic: the same tool-call against the same policy always yields the same
+decision, with no model in the loop, and a full audit trail of everything the agent
+tried.
 
 ![License](https://img.shields.io/badge/license-Apache--2.0-B87333)
 ![Mode](https://img.shields.io/badge/mode-enforce-1E2328)
 ![Policy tier](https://img.shields.io/badge/policy%20tier-Linux%20|%20macOS%20|%20Windows-1E2328)
-![Containment](https://img.shields.io/badge/OS%20containment-Linux%205.13%2B-B87333)
+![Containment](https://img.shields.io/badge/OS%20containment-Linux%20|%20Windows%20|%20macOS-B87333)
+![MCP](https://img.shields.io/badge/integrations-MCP%20|%20LangChain-1E2328)
 
 ## The problem
 
@@ -34,7 +38,7 @@ Asphallea does not judge or filter what the model says. It contains what the age
 does. This is an operating-systems problem wearing an AI costume: process
 isolation, least privilege, syscall filtering, blast-radius containment. That
 framing is the whole point. A pure-ML approach cannot give you kernel-level
-containment. Asphallea does, on Linux, where it counts.
+containment. Asphallea does, on Linux, Windows, and macOS, where it counts.
 
 ## Two tiers
 
@@ -69,54 +73,64 @@ binary with `ASPHALLEA_CORE_BIN`.
 
 ## Quickstart
 
-Wrap a tool in a least-privilege policy in about five minutes. This uses only the
+Define a policy once and put it between the agent and its tools. This uses only the
 policy tier, so it runs the same on every platform.
 
 ```python
-import os, tempfile
-from asphallea import AuditLog, Policy, PolicyViolation, guard
+from asphallea import Interceptor, Policy
 
-workspace = tempfile.mkdtemp(prefix="asphallea-")
-with open(os.path.join(workspace, "notes.txt"), "w") as fh:
-    fh.write("hello from inside the workspace\n")
-
-# Least privilege: may call read_file, and only under the workspace.
+# One declarative policy. It governs tools it did not author (an MCP server's) by
+# declaring how each tool's arguments map to resources.
 policy = (
-    Policy.builder("quickstart")
-    .allow_tools("read_file")
-    .read_paths(workspace)
+    Policy.builder("agent")
+    .tool("filesystem.read", reads="path")
+    .tool("filesystem.delete", writes="path")
+    .read_paths("./workspace")
+    .write_paths("./workspace/out")
     .deny_network()
     .build()
 )
 
-@guard(policy, tool="read_file", reads="path", audit=AuditLog("audit.jsonl"))
+# The choke point: decide a tool-call by name and arguments. Deterministic.
+gate = Interceptor(policy)
+gate.decide("filesystem.delete", {"path": "/etc/passwd"}).allowed   # -> False
+gate.enforce("filesystem.delete", {"path": "/etc/passwd"})          # raises PolicyViolation
+```
+
+Wrap an MCP session so every tool-call is decided before it runs:
+
+```python
+from asphallea.integrations.mcp import guard_mcp_session
+
+session = guard_mcp_session(session, policy)   # a denied call never reaches the server
+```
+
+Or guard a Python function tool directly:
+
+```python
+from asphallea import guard
+
+@guard(policy, tool="filesystem.read", reads="path")
 def read_file(path: str) -> str:
     with open(path) as fh:
         return fh.read()
-
-# Allowed: inside the workspace.
-print(read_file(os.path.join(workspace, "notes.txt")))
-
-# Denied: outside the workspace. A hijacked agent reaching for your SSH key
-# is stopped here, deterministically.
-try:
-    read_file(os.path.expanduser("~/.ssh/id_rsa"))
-except PolicyViolation as exc:
-    print("denied:", exc.decision.rule, exc.decision.reason)
 ```
 
-The full script is in [`examples/quickstart.py`](examples/quickstart.py). Run it:
+`@guard`, the MCP adapter, and `Interceptor.decide` all funnel through one decision
+point, so a decorated function and an MCP tool-call are decided and logged by the
+same code. The full quickstart is [`examples/quickstart.py`](examples/quickstart.py):
 
 ```sh
 python examples/quickstart.py
 ```
 
-## The containment tier (Linux)
+## The containment tier
 
-For tools that run shell commands or execute code, the policy tier gates whether the
-tool runs. The containment tier contains what it then does.
+The policy tier gates whether a tool runs. For tools that run shell commands or
+execute code, the containment tier contains what they then do, at the OS level, on
+Linux, Windows, and macOS.
 
-Build the Rust core once:
+Build the Rust core once (or install a release wheel, which bundles it):
 
 ```sh
 cd core
@@ -131,6 +145,7 @@ from asphallea import Policy, sandbox
 
 policy = (
     Policy.builder("shell")
+    .allow_tools("run_shell")
     .read_paths("./workspace")
     .write_paths("./workspace/out")
     .deny_network()
@@ -138,11 +153,12 @@ policy = (
     .build()
 )
 
-result = sandbox.run(["bash", "-c", "echo hello > ./workspace/out/ok.txt"], policy=policy)
+result = sandbox.run(["bash", "-c", "echo hello > ./workspace/out/ok.txt"],
+                     policy=policy, tool="run_shell")
 print(result.returncode, result.controls)
 
-# This is contained: the write lands outside the allowlist and Landlock blocks it.
-blocked = sandbox.run(["bash", "-c", "cat ~/.ssh/id_rsa"], policy=policy)
+# Contained: the read lands outside the allowlist and the OS sandbox blocks it.
+blocked = sandbox.run(["bash", "-c", "cat ~/.ssh/id_rsa"], policy=policy, tool="run_shell")
 print(blocked.returncode, blocked.stderr)  # non-zero, permission denied
 ```
 
@@ -177,9 +193,12 @@ python examples/demo.py
 
 A policy declares, per policy:
 
-- which tools may be called
+- which tools may be called (allowlist), and which are denied outright (a denial
+  wins)
+- how each tool's arguments map to resources, so a tool it did not author can be
+  governed: `.tool("filesystem.delete", writes="path")`
 - filesystem paths that are readable and writable
-- whether the network is allowed
+- network hosts that are allowed or denied (exact host or parent domain)
 - per-tool call-count and rate limits
 - a wall-clock timeout per call
 - a spend cap, modeled as a maximum number of invocations of a paid tool
@@ -197,15 +216,33 @@ policy = Policy.from_yaml("policies/example.yaml")
 ## Audit log
 
 Every decision is written as one JSON object per line (JSONL), append-only. Each
-record carries the timestamp, tool, arguments, the allow or deny decision, the
-reason, and the exact policy rule that fired. A redaction hook scrubs likely secrets
-before anything is written.
+record carries the timestamp, tool, arguments (by name, the shape a tool-call has),
+the allow or deny decision, the reason, and the exact policy rule that fired. A
+redaction hook scrubs likely secrets before anything is written.
 
 ```json
-{"timestamp": "2026-07-12T18:20:01Z", "tier": "policy", "tool": "read_file", "decision": "deny", "rule": "read_paths", "reason": "read path '/home/u/.ssh/id_rsa' is not under an allowed read prefix", "policy": "quickstart", "args": ["/home/u/.ssh/id_rsa"], "kwargs": {}}
+{"timestamp": "2026-07-12T18:20:01Z", "tier": "policy", "tool": "filesystem.delete", "decision": "deny", "rule": "write_paths", "reason": "write path '/etc/passwd' is not under an allowed write prefix", "policy": "agent", "args": [], "kwargs": {"path": "/etc/passwd"}}
 ```
 
 Swap in your own audit sink or redactor. See [`asphallea/audit.py`](asphallea/audit.py).
+
+## MCP
+
+An MCP tool-call is a tool name and an arguments dict, which is exactly what the
+decision point takes, so guarding a session is one line. A denied tool-call never
+reaches the server.
+
+```python
+from asphallea.integrations.mcp import guard_mcp_session
+
+session = guard_mcp_session(session, policy)          # raises PolicyViolation on deny
+# or, to let the agent loop continue on a normal tool error:
+session = guard_mcp_session(session, policy, on_deny="error")
+```
+
+`guard_call_tool(fn, policy)` wraps a bare `call_tool` (client or server side, sync
+or async), and `namespace=` keeps two servers exposing the same tool name apart. The
+adapter is duck-typed, so it works whether or not the `mcp` package is installed.
 
 ## LangChain and LangGraph
 
