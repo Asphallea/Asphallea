@@ -141,17 +141,21 @@ jobs:
         continue-on-error: true
         run: |
           set +e
-          echo "sandbox-exec: $(command -v sandbox-exec)"
+          echo "macOS: $(sw_vers -productVersion)  arch: $(uname -m)"
           WS="$RUNNER_TEMP/dbg_ws"; mkdir -p "$WS"; echo "HELLO-SEATBELT" > "$WS/f.txt"
-          echo "== 1. raw allow-default =="
-          sandbox-exec -p '(version 1)(allow default)' /bin/cat "$WS/f.txt"; echo "exit=$?"
-          echo "== 2. raw deny-default + read allow + file-map-executable =="
-          sandbox-exec -p "(version 1)(deny default)(allow process*)(allow sysctl-read)(allow mach*)(allow file-read* file-map-executable (subpath \"$WS\") (subpath \"/usr\") (subpath \"/System\") (subpath \"/bin\") (subpath \"/private/var/db\"))" /bin/cat "$WS/f.txt"; echo "exit=$?"
-          echo "== 3. our binary =="
-          BIN="$GITHUB_WORKSPACE/core/target/release/asphallea-run"
-          printf '{"name":"d","filesystem":{"read":["%s"],"write":["%s"]},"network":"deny","limits":{}}' "$WS" "$WS" > "$RUNNER_TEMP/pol.json"
-          "$BIN" --policy "$RUNNER_TEMP/pol.json" --report "$RUNNER_TEMP/rep.json" -- /bin/cat "$WS/f.txt"; echo "exit=$?"
-          echo "== report =="; cat "$RUNNER_TEMP/rep.json"; echo
+          # Let the child write to stderr (inherited pipe) and the tty so dyld's own
+          # error text is visible instead of being swallowed by deny-default.
+          IO='(allow file-read-data file-write-data (require-not (subpath "/")))(allow file-read* file-write* (subpath "/dev"))(allow file-ioctl)'
+          BASE="(version 1)(deny default)(allow process*)(allow mach*)(allow sysctl-read)(allow signal)(allow file-read-metadata)$IO"
+          echo "== A. restricted read+map, dyld verbose (reveals the denied path) =="
+          DYLD_PRINT_LIBRARIES=1 DYLD_PRINT_WARNINGS=1 sandbox-exec -p "$BASE(allow file-read* file-map-executable (subpath \"$WS\") (subpath \"/usr\") (subpath \"/System\") (subpath \"/bin\") (subpath \"/private/var/db\"))" /bin/cat "$WS/f.txt" 2>&1 | tail -30; echo "exit=${PIPESTATUS[0]}"
+          echo "== B. add Cryptexes (Apple-Silicon shared cache) + /private/var/db/dyld =="
+          sandbox-exec -p "$BASE(allow file-read* file-map-executable (subpath \"$WS\") (subpath \"/usr\") (subpath \"/System\") (subpath \"/bin\") (subpath \"/private\"))" /bin/cat "$WS/f.txt"; echo "exit=$?"
+          echo "== C. sanity: unrestricted read+map should run =="
+          sandbox-exec -p "$BASE(allow file-read*)(allow file-map-executable)" /bin/cat "$WS/f.txt"; echo "exit=$?"
+          echo "== ls of the shared-cache locations =="
+          ls -la /System/Library/dyld/ 2>&1 | head -3
+          ls -la /System/Volumes/Preboot/Cryptexes/OS/System/Library/dyld/ 2>&1 | head -5
       - name: run tests with Seatbelt containment
         env:
           ASPHALLEA_CORE_BIN: ${{ github.workspace }}/core/target/release/asphallea-run
