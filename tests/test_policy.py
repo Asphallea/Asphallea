@@ -142,6 +142,102 @@ def test_from_dict_rejects_unknown_keys():
         Policy.from_dict({"name": "x", "bogus": 1})
 
 
+# --- declarative tool-argument schema --------------------------------------
+
+
+def test_tool_declares_args_and_allowlists():
+    p = (
+        Policy.builder("p")
+        .tool("filesystem.read", reads="path")
+        .tool("filesystem.delete", writes="path")
+        .tool("http.fetch", network="url")
+        .build()
+    )
+    # Declaring a tool allowlists it, so exactly these three are permitted.
+    assert p.allowed_tools == frozenset(
+        {"filesystem.read", "filesystem.delete", "http.fetch"}
+    )
+    assert p.tool_allowed("filesystem.read") is True
+    assert p.tool_allowed("shell.exec") is False
+    # And the argument mapping is recorded.
+    assert p.args_for("filesystem.read").reads == ("path",)
+    assert p.args_for("filesystem.delete").writes == ("path",)
+    assert p.args_for("http.fetch").network == ("url",)
+
+
+def test_tool_allow_false_declares_without_allowlisting():
+    p = Policy.builder("p").tool("x", writes="path", allow=False).build()
+    assert p.allowed_tools is None  # no allowlist was enabled
+    assert p.args_for("x").writes == ("path",)
+
+
+def test_tool_args_accept_a_list_of_names():
+    p = Policy.builder("p").tool("copy", reads=["src"], writes=["dst", "tmp"]).build()
+    spec = p.args_for("copy")
+    assert spec.reads == ("src",)
+    assert spec.writes == ("dst", "tmp")
+    assert spec.declared is True
+
+
+def test_args_for_undeclared_tool_is_empty():
+    p = Policy.builder("p").build()
+    spec = p.args_for("nope")
+    assert spec.reads == () and spec.writes == () and spec.network == ()
+    assert spec.declared is False
+
+
+def test_deny_tool_wins_over_allowlist():
+    p = Policy.builder("p").allow_tools("a", "b").deny_tool("b").build()
+    assert p.tool_allowed("a") is True
+    assert p.tool_allowed("b") is False  # denial beats the allowlist
+
+
+def test_deny_tool_beats_tool_declaration():
+    p = Policy.builder("p").tool("filesystem.delete", writes="path").deny_tools(
+        "filesystem.delete"
+    ).build()
+    assert p.tool_allowed("filesystem.delete") is False
+
+
+def test_from_yaml_tool_args_and_deny(tmp_path):
+    yaml_text = """
+name: mcp
+tools:
+  allow: [fs.read]
+  deny: [shell.exec]
+  args:
+    fs.read:
+      reads: path
+    fs.delete:
+      writes: [path, backup]
+    web.get:
+      network: url
+"""
+    f = tmp_path / "p.yaml"
+    f.write_text(yaml_text, encoding="utf-8")
+    p = Policy.from_yaml(str(f))
+    assert p.args_for("fs.read").reads == ("path",)
+    assert p.args_for("fs.delete").writes == ("path", "backup")
+    assert p.args_for("web.get").network == ("url",)
+    # Declared tools are allowlisted alongside the explicit allow list.
+    assert p.tool_allowed("fs.read") is True
+    assert p.tool_allowed("fs.delete") is True
+    assert p.tool_allowed("shell.exec") is False  # explicit deny
+    assert p.tool_allowed("never.declared") is False
+
+
+def test_from_dict_rejects_unknown_tool_arg_key():
+    with pytest.raises(PolicyError):
+        Policy.from_dict(
+            {"name": "x", "tools": {"args": {"t": {"reeds": "path"}}}}
+        )
+
+
+def test_from_dict_rejects_unknown_tools_key():
+    with pytest.raises(PolicyError):
+        Policy.from_dict({"name": "x", "tools": {"allowed": ["a"]}})
+
+
 def test_from_dict_requires_name():
     with pytest.raises(PolicyError):
         Policy.from_dict({"tools": {"allow": ["a"]}})
