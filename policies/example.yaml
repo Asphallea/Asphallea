@@ -9,13 +9,29 @@
 
 name: least-privilege-agent
 
-# Only these tools may be called. Every other tool is denied.
+# Which tools the agent may call, and how each tool's arguments map to resources.
+#
+# `args` is the important part: it declares that a tool's `path` argument is a
+# filesystem read or write, so the engine can check that value against the
+# allowlists below. That is what lets this policy govern tools it did not author,
+# such as an MCP server's tool-calls. Declaring a tool under `args` also
+# allowlists it.
 tools:
   allow:
-    - read_file
-    - write_file
     - search
     - run_shell
+  # Denied outright. A denial wins even if the tool is also allowlisted.
+  deny:
+    - filesystem.delete
+  args:
+    read_file:
+      reads: path
+    write_file:
+      writes: path
+    filesystem.delete:
+      writes: path
+    search:
+      network: url
 
 # Filesystem allowlist. Paths are normalized to absolute, symlink-resolved form.
 # A write path also grants read. Everything outside these prefixes is denied.

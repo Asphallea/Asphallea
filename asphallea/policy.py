@@ -27,6 +27,7 @@ __all__ = [
     "PolicyBuilder",
     "RateLimit",
     "ResourceLimits",
+    "ToolArgs",
     "PolicyError",
 ]
 
@@ -92,6 +93,41 @@ class ResourceLimits:
         return out
 
 
+def _as_names(value: Any) -> Tuple[str, ...]:
+    """Coerce an argument-name spec (``"path"`` or ``["src", "dst"]``) to a tuple."""
+    if value is None:
+        return ()
+    if isinstance(value, str):
+        return (value,)
+    return tuple(str(v) for v in value)
+
+
+@dataclass(frozen=True)
+class ToolArgs:
+    """Which of a tool's arguments name filesystem paths or network targets.
+
+    This is what lets a policy govern a tool it did not author. An MCP server
+    exposes ``filesystem.delete(path=...)``; the policy declares that ``path`` is a
+    filesystem write, and the engine checks that value against the write allowlist.
+    Without this the SDK would have to be told the mapping in Python at every call
+    site, which is impossible for tools you did not write.
+
+    Attributes:
+        reads: Argument names whose values are paths the tool reads.
+        writes: Argument names whose values are paths the tool writes.
+        network: Argument names whose values are network targets (URL or host).
+    """
+
+    reads: Tuple[str, ...] = ()
+    writes: Tuple[str, ...] = ()
+    network: Tuple[str, ...] = ()
+
+    @property
+    def declared(self) -> bool:
+        """True if this tool declares any resource-bearing argument."""
+        return bool(self.reads or self.writes or self.network)
+
+
 @dataclass(frozen=True)
 class Policy:
     """An immutable least-privilege policy.
@@ -101,6 +137,11 @@ class Policy:
         allowed_tools: If ``None``, tools are not restricted by an allowlist and
             the act of wrapping a tool is the opt-in. If a set, only listed tool
             names are permitted and every other tool is denied.
+        denied_tools: Tool names denied outright. A denial wins over the
+            allowlist, so a tool can be blocked without rewriting the allowlist.
+        tool_args: Per-tool declaration of which arguments carry filesystem paths
+            or network targets, keyed by tool name. This is what lets the policy
+            govern tools it did not author, such as MCP tool-calls.
         read_paths: Absolute, normalized prefixes a tool may read from.
         write_paths: Absolute, normalized prefixes a tool may write to. A write
             path also grants read.
@@ -117,6 +158,8 @@ class Policy:
 
     name: str
     allowed_tools: Optional[frozenset] = None
+    denied_tools: frozenset = frozenset()
+    tool_args: Mapping[str, ToolArgs] = field(default_factory=dict)
     read_paths: Tuple[str, ...] = ()
     write_paths: Tuple[str, ...] = ()
     network: str = "deny"
@@ -177,9 +220,20 @@ class Policy:
 
         tools = data.get("tools") or {}
         if tools:
-            _reject_unknown(tools, {"allow"}, "tools")
+            _reject_unknown(tools, {"allow", "deny", "args"}, "tools")
             for tool in tools.get("allow", []) or []:
                 builder.allow_tool(str(tool))
+            for tool in tools.get("deny", []) or []:
+                builder.deny_tool(str(tool))
+            for tool, spec in (tools.get("args") or {}).items():
+                spec = spec or {}
+                _reject_unknown(spec, {"reads", "writes", "network"}, f"tools.args.{tool}")
+                builder.tool(
+                    str(tool),
+                    reads=spec.get("reads"),
+                    writes=spec.get("writes"),
+                    network=spec.get("network"),
+                )
 
         fs = data.get("filesystem") or {}
         if fs:
@@ -249,8 +303,18 @@ class Policy:
     # -- queries -----------------------------------------------------------
 
     def tool_allowed(self, tool: str) -> bool:
-        """Return whether ``tool`` passes the tool allowlist (if one is set)."""
+        """Return whether ``tool`` passes the tool allowlist and denylist.
+
+        A denial always wins: a tool named in ``denied_tools`` is refused even if
+        it also appears in the allowlist.
+        """
+        if tool in self.denied_tools:
+            return False
         return self.allowed_tools is None or tool in self.allowed_tools
+
+    def args_for(self, tool: str) -> ToolArgs:
+        """Return the declared argument mapping for ``tool`` (empty if none)."""
+        return self.tool_args.get(tool, ToolArgs())
 
     def to_core_json(self) -> Dict[str, Any]:
         """Serialize the containment-relevant fields for the Rust core.
@@ -289,6 +353,8 @@ class PolicyBuilder:
         """Start building a policy named ``name``."""
         self._name = name
         self._allowed_tools: Optional[set] = None
+        self._denied_tools: set = set()
+        self._tool_args: Dict[str, ToolArgs] = {}
         self._read_paths: list = []
         self._write_paths: list = []
         self._network = "deny"
@@ -308,6 +374,53 @@ class PolicyBuilder:
     def allow_tools(self, *names: str) -> "PolicyBuilder":
         """Add several tool names to the allowlist."""
         for name in names:
+            self.allow_tool(name)
+        return self
+
+    def deny_tool(self, name: str) -> "PolicyBuilder":
+        """Deny ``name`` outright. A denial wins over the allowlist."""
+        self._denied_tools.add(name)
+        return self
+
+    def deny_tools(self, *names: str) -> "PolicyBuilder":
+        """Deny several tool names outright."""
+        for name in names:
+            self.deny_tool(name)
+        return self
+
+    def tool(
+        self,
+        name: str,
+        *,
+        reads: Any = None,
+        writes: Any = None,
+        network: Any = None,
+        allow: bool = True,
+    ) -> "PolicyBuilder":
+        """Declare a tool and how its arguments map to resources.
+
+        This is the declarative equivalent of the ``reads=``/``writes=`` keywords
+        on :func:`~asphallea.guard.guard`, and it is what makes a policy able to
+        govern a tool it did not author (an MCP tool-call, for example)::
+
+            Policy.builder("agent")
+                .tool("filesystem.read", reads="path")
+                .tool("filesystem.delete", writes="path")
+                .tool("http.fetch", network="url")
+                .read_paths("./workspace")
+                .build()
+
+        Each of ``reads``, ``writes``, and ``network`` takes an argument name or a
+        list of argument names. Declaring a tool also adds it to the allowlist, so
+        the policy above permits exactly those three tools and denies the rest.
+        Pass ``allow=False`` to declare the mapping without allowlisting.
+        """
+        self._tool_args[name] = ToolArgs(
+            reads=_as_names(reads),
+            writes=_as_names(writes),
+            network=_as_names(network),
+        )
+        if allow:
             self.allow_tool(name)
         return self
 
@@ -397,6 +510,8 @@ class PolicyBuilder:
         return Policy(
             name=self._name,
             allowed_tools=(frozenset(self._allowed_tools) if self._allowed_tools is not None else None),
+            denied_tools=frozenset(self._denied_tools),
+            tool_args=dict(self._tool_args),
             read_paths=read_union,
             write_paths=write,
             network=self._network,
