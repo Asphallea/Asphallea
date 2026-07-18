@@ -26,6 +26,12 @@ const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
 const SYSTEM_READ: &[&str] = &[
     "/usr",
     "/System",
+    // On Apple Silicon the dyld shared cache lives only in the OS cryptex, on the
+    // Preboot volume mounted here — not under /System/Library/dyld, which does not
+    // exist. This is a separate volume, so a (subpath "/System") rule does not
+    // cover it; without an explicit rule dyld cannot map the cache and every
+    // sandboxed process aborts (SIGABRT) before it runs.
+    "/System/Volumes/Preboot/Cryptexes",
     "/Library",
     "/bin",
     "/sbin",
