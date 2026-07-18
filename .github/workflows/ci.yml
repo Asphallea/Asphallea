@@ -143,13 +143,15 @@ jobs:
           set +e
           echo "macOS: $(sw_vers -productVersion)  arch: $(uname -m)"
           WS="$RUNNER_TEMP/dbg_ws"; mkdir -p "$WS"; echo "HELLO-SEATBELT" > "$WS/f.txt"
-          echo "== TRACE: allow-default but log every op cat performs =="
-          T="$RUNNER_TEMP/trace.sb"
-          sandbox-exec -p "(version 1)(allow default)(trace \"$T\")" /bin/cat "$WS/f.txt"; echo "exit=$?"
-          echo "-- distinct file-read/map targets cat actually touches --"
-          grep -oE '\((file-read[*a-z-]*|file-map-executable) [^)]*\)' "$T" 2>/dev/null | sort -u
-          echo "-- raw trace head (in case grep missed the shape) --"
-          head -40 "$T" 2>/dev/null
+          IO='(allow file-read-data file-write-data (require-not (subpath "/")))(allow file-read* file-write* (subpath "/dev"))(allow file-ioctl)'
+          BASE="(version 1)(deny default)(allow process*)(allow mach*)(allow sysctl-read)(allow signal)(allow file-read-metadata)$IO"
+          READ='(allow file-read* (subpath "'"$WS"'") (subpath "/usr") (subpath "/System") (subpath "/System/Volumes/Preboot/Cryptexes") (subpath "/Library") (subpath "/bin") (subpath "/sbin") (subpath "/etc") (subpath "/private/etc") (subpath "/private/var/db") (subpath "/private/var/folders") (subpath "/opt"))'
+          echo "== run the restricted profile, then read the kernel's sandbox denials =="
+          sandbox-exec -p "$BASE$READ(allow file-map-executable)" /bin/cat "$WS/f.txt"; echo "exit=$?"
+          echo "-- Sandbox denials in the last 60s (exact op + path) --"
+          log show --last 60s --style compact --predicate 'eventMessage CONTAINS "deny"' 2>/dev/null | grep -iE "cat|sandbox|deny" | grep -ivE "sandboxd|kernel\]" | sort -u | head -40
+          echo "-- fallback: any Sandbox-subsystem messages --"
+          log show --last 60s --style compact --predicate 'subsystem == "com.apple.sandbox"' 2>/dev/null | tail -30
       - name: run tests with Seatbelt containment
         env:
           ASPHALLEA_CORE_BIN: ${{ github.workspace }}/core/target/release/asphallea-run
