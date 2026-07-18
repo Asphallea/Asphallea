@@ -143,16 +143,13 @@ jobs:
           set +e
           echo "macOS: $(sw_vers -productVersion)  arch: $(uname -m)"
           WS="$RUNNER_TEMP/dbg_ws"; mkdir -p "$WS"; echo "HELLO-SEATBELT" > "$WS/f.txt"
-          IO='(allow file-read-data file-write-data (require-not (subpath "/")))(allow file-read* file-write* (subpath "/dev"))(allow file-ioctl)'
-          BASE="(version 1)(deny default)(allow process*)(allow mach*)(allow sysctl-read)(allow signal)(allow file-read-metadata)$IO"
-          READ='(allow file-read* (subpath "'"$WS"'") (subpath "/usr") (subpath "/System") (subpath "/bin") (subpath "/private/var/db"))'
-          echo "== D. read restricted, map UNRESTRICTED (the source approach) =="
-          sandbox-exec -p "$BASE$READ(allow file-map-executable)" /bin/cat "$WS/f.txt"; echo "exit=$?"
-          echo "== D2. confirm the secret is still unreadable under D =="
-          echo "TOPSECRET" > "$RUNNER_TEMP/secret.txt"
-          sandbox-exec -p "$BASE$READ(allow file-map-executable)" /bin/cat "$RUNNER_TEMP/secret.txt"; echo "exit=$? (want non-zero)"
-          echo "== F. if D failed, dyld verbose to name the remaining denial =="
-          DYLD_PRINT_LIBRARIES=1 DYLD_PRINT_WARNINGS=1 sandbox-exec -p "$BASE$READ(allow file-map-executable)" /bin/cat "$WS/f.txt" 2>&1 | tail -6; echo "exit=${PIPESTATUS[0]}"
+          echo "== TRACE: allow-default but log every op cat performs =="
+          T="$RUNNER_TEMP/trace.sb"
+          sandbox-exec -p "(version 1)(allow default)(trace \"$T\")" /bin/cat "$WS/f.txt"; echo "exit=$?"
+          echo "-- distinct file-read/map targets cat actually touches --"
+          grep -oE '\((file-read[*a-z-]*|file-map-executable) [^)]*\)' "$T" 2>/dev/null | sort -u
+          echo "-- raw trace head (in case grep missed the shape) --"
+          head -40 "$T" 2>/dev/null
       - name: run tests with Seatbelt containment
         env:
           ASPHALLEA_CORE_BIN: ${{ github.workspace }}/core/target/release/asphallea-run
