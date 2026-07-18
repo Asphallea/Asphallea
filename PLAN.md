@@ -148,7 +148,7 @@ result = sandbox.run(["bash", "-c", cmd], policy=policy, tool="run_shell", audit
 9. `core/` Rust crate: `Cargo.toml`, `main.rs`, `policy.rs`, `landlock.rs`,
    `seccomp.rs`, `netns.rs`, `rlimits.rs`, `report.rs`
 10. `policies/example.yaml`
-11. `examples/quickstart.py`, `examples/injection_demo.py`
+11. `examples/quickstart.py`, `examples/demo.py`
 12. `tests/` policy, audit, engine, guard, sandbox (Linux-gated)
 13. `docs/why-agent-security-is-an-os-problem.md`
 14. `README.md` final pass with honest platform matrix and working quickstart

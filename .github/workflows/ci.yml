@@ -85,7 +85,7 @@ jobs:
       - name: run the injection demo
         env:
           ASPHALLEA_CORE_BIN: ${{ github.workspace }}/core/target/release/asphallea-run
-        run: python examples/injection_demo.py
+        run: python examples/demo.py
 
   containment-windows:
     # Builds the Windows core and runs the suite with the backend available, so the
@@ -115,7 +115,7 @@ jobs:
       - name: run the injection demo
         env:
           ASPHALLEA_CORE_BIN: ${{ github.workspace }}\core\target\release\asphallea-run.exe
-        run: python examples/injection_demo.py
+        run: python examples/demo.py
 
   containment-macos:
     # Builds the macOS core and runs the suite with the Seatbelt backend available,
@@ -144,4 +144,4 @@ jobs:
       - name: run the injection demo
         env:
           ASPHALLEA_CORE_BIN: ${{ github.workspace }}/core/target/release/asphallea-run
-        run: python examples/injection_demo.py
+        run: python examples/demo.py
