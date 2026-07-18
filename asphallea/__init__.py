@@ -44,9 +44,11 @@ from .audit import (
     no_redaction,
 )
 from .engine import Decision, Engine
-from .guard import PolicyTimeout, PolicyViolation, guard
+from .errors import PolicyTimeout, PolicyViolation
+from .guard import guard
+from .intercept import Interceptor
 from .integrity import IntegrityError, IntegrityResult, verify_core
-from .policy import Policy, PolicyBuilder, PolicyError, RateLimit, ResourceLimits
+from .policy import Policy, PolicyBuilder, PolicyError, RateLimit, ResourceLimits, ToolArgs
 from .sandbox import Capabilities, ContainmentUnavailable, SandboxResult, capabilities
 
 __version__ = "0.0.1"
@@ -59,9 +61,12 @@ __all__ = [
     "PolicyError",
     "RateLimit",
     "ResourceLimits",
+    "ToolArgs",
     # engine
     "Engine",
     "Decision",
+    # the single decision choke point
+    "Interceptor",
     # guard
     "guard",
     "PolicyViolation",
