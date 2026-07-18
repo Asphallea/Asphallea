@@ -95,6 +95,12 @@ fn build_profile(policy: &Policy) -> String {
     p.push_str("(allow signal (target self))\n");
     p.push_str("(allow file-read-metadata)\n");
     p.push_str("(allow file-ioctl)\n");
+    // The standard streams the process inherited (stdout, stderr, stdin) are pipes
+    // or sockets with no filesystem path, so a command's output would be lost under
+    // deny-default. Allow data read/write on objects that are not under the
+    // filesystem root; regular files keep their path and stay governed by the
+    // allowlists below.
+    p.push_str("(allow file-read-data file-write-data (require-not (subpath \"/\")))\n");
 
     for base in SYSTEM_READ {
         p.push_str(&format!(
