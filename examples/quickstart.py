@@ -1,67 +1,72 @@
-"""Asphallea quickstart: wrap one tool in a least-privilege policy.
+"""Asphallea quickstart: govern an agent's tool-calls with a policy.
 
 Run it:
 
     python examples/quickstart.py
 
 This uses only the policy tier, so it behaves identically on Linux, macOS, and
-Windows. It builds a policy, guards a file-reading tool, shows an allowed call and
-a denied call, and prints the audit trail.
+Windows. It shows the two shapes a decision arrives in: a raw tool-call
+(``name`` + ``arguments``, which is what MCP gives you) and a wrapped MCP session.
 """
 
+import asyncio
 import os
 import tempfile
 
-from asphallea import AuditLog, Policy, PolicyViolation, guard
+from asphallea import Interceptor, Policy, PolicyViolation
+from asphallea.integrations.mcp import guard_mcp_session
+
+
+class FakeFilesystemServer:
+    """Stand-in for an MCP filesystem server whose delete really removes a file."""
+
+    async def call_tool(self, name, arguments=None):
+        if name == "filesystem.delete":
+            os.remove(arguments["path"])
+            return "deleted"
+        raise ValueError(name)
 
 
 def main() -> None:
-    # A scratch workspace the tool is allowed to read.
     workspace = tempfile.mkdtemp(prefix="asphallea-quickstart-")
-    with open(os.path.join(workspace, "notes.txt"), "w", encoding="utf-8") as fh:
-        fh.write("hello from inside the workspace\n")
+    # A real file the agent must not touch, outside the workspace.
+    protected = os.path.join(tempfile.mkdtemp(), "production.db")
+    with open(protected, "w", encoding="utf-8") as fh:
+        fh.write("PRODUCTION DATA\n")
 
-    audit_path = os.path.join(workspace, "audit.jsonl")
-
-    # Least privilege: this agent may call read_file, and only under the
-    # workspace. Network is denied. Everything else is denied by default.
+    # One declarative policy. It governs tools it did not author by declaring how
+    # each tool's arguments map to resources: filesystem.delete's `path` is a
+    # write, checked against the write allowlist below.
     policy = (
         Policy.builder("quickstart")
-        .allow_tools("read_file")
+        .tool("filesystem.read", reads="path")
+        .tool("filesystem.delete", writes="path")
         .read_paths(workspace)
+        .write_paths(workspace)
         .deny_network()
         .build()
     )
 
-    # Guard the tool. `reads="path"` tells the engine which argument is a path to
-    # check against the read allowlist.
-    @guard(policy, tool="read_file", reads="path", audit=AuditLog(audit_path))
-    def read_file(path: str) -> str:
-        """Read and return the contents of a file."""
-        with open(path, encoding="utf-8") as fh:
-            return fh.read()
-
     print("Asphallea quickstart\n" + "=" * 40)
 
-    # 1. Allowed: a path inside the workspace.
+    # 1. The choke point: decide a tool-call by name and arguments. Deterministic,
+    # no model in the loop.
+    gate = Interceptor(policy)
     inside = os.path.join(workspace, "notes.txt")
-    print(f"\nreading an allowed path:\n  {inside}")
-    print(f"  -> {read_file(inside)!r}")
+    allowed = gate.decide("filesystem.delete", {"path": inside})
+    denied = gate.decide("filesystem.delete", {"path": protected})
+    print(f"\ndelete inside the workspace : allowed={allowed.allowed}")
+    print(f"delete the protected file   : allowed={denied.allowed} (rule={denied.rule})")
 
-    # 2. Denied: a path outside the workspace. A hijacked agent trying to read
-    # your SSH key or /etc/passwd is stopped here, deterministically.
-    outside = os.path.join(os.path.expanduser("~"), ".ssh", "id_rsa")
-    print(f"\nreading a disallowed path:\n  {outside}")
+    # 2. The same policy wrapping an MCP session, in one line. Every call_tool is
+    # now decided before it runs, so a denied call never reaches the server.
+    session = guard_mcp_session(FakeFilesystemServer(), policy)
+    print("\nagent calls filesystem.delete on the protected file through MCP:")
     try:
-        read_file(outside)
+        asyncio.run(session.call_tool("filesystem.delete", {"path": protected}))
     except PolicyViolation as exc:
-        print(f"  -> DENIED by rule {exc.decision.rule!r}: {exc.decision.reason}")
-
-    # The audit log recorded both decisions as JSONL.
-    print(f"\naudit trail ({audit_path}):")
-    with open(audit_path, encoding="utf-8") as fh:
-        for line in fh:
-            print("  " + line.rstrip())
+        print(f"  BLOCKED by policy [{exc.decision.rule}]: {exc.decision.reason}")
+        print(f"  protected file still present: {os.path.exists(protected)}")
 
 
 if __name__ == "__main__":
