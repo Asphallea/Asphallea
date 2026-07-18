@@ -84,6 +84,88 @@ def test_decide_flags_network_argument(tmp_path):
     assert d.denied and d.rule == "network"
 
 
+# --- network host rules (Step 4) -------------------------------------------
+
+
+def net_policy(**kw):
+    b = Policy.builder("net").tool("http.fetch", network="url")
+    if kw.get("allow_default"):
+        b.allow_network()
+    for h in kw.get("allow_hosts", []):
+        b.allow_hosts(h)
+    for h in kw.get("deny_hosts", []):
+        b.deny_hosts(h)
+    return b.build()
+
+
+def test_allow_hosts_permits_a_listed_host_when_default_deny():
+    gate = Interceptor(net_policy(allow_hosts=["api.example.com"]))
+    assert gate.decide("http.fetch", {"url": "https://api.example.com/v1"}).allowed
+
+
+def test_allow_hosts_covers_subdomains_but_not_lookalikes():
+    gate = Interceptor(net_policy(allow_hosts=["example.com"]))
+    assert gate.decide("http.fetch", {"url": "https://api.example.com/x"}).allowed
+    assert gate.decide("http.fetch", {"url": "https://example.com"}).allowed
+    # A lookalike domain must not match.
+    bad = gate.decide("http.fetch", {"url": "https://notexample.com"})
+    assert bad.denied and bad.rule == "network"
+
+
+def test_unlisted_host_denied_when_default_deny():
+    gate = Interceptor(net_policy(allow_hosts=["api.example.com"]))
+    d = gate.decide("http.fetch", {"url": "https://attacker.example/steal"})
+    assert d.denied and d.rule == "network"
+
+
+def test_deny_hosts_wins_over_default_allow():
+    gate = Interceptor(net_policy(allow_default=True, deny_hosts=["attacker.example"]))
+    assert gate.decide("http.fetch", {"url": "https://good.com"}).allowed
+    d = gate.decide("http.fetch", {"url": "https://attacker.example"})
+    assert d.denied and d.rule == "network"
+
+
+def test_deny_hosts_wins_over_allow_hosts():
+    policy = (
+        Policy.builder("net")
+        .tool("http.fetch", network="url")
+        .allow_hosts("example.com")
+        .deny_hosts("secret.example.com")
+        .build()
+    )
+    gate = Interceptor(policy)
+    assert gate.decide("http.fetch", {"url": "https://api.example.com"}).allowed
+    # A denied subdomain of an allowed domain is still denied.
+    d = gate.decide("http.fetch", {"url": "https://secret.example.com"})
+    assert d.denied and d.rule == "network"
+
+
+def test_host_match_ignores_scheme_port_and_case():
+    gate = Interceptor(net_policy(allow_hosts=["API.Example.com"]))
+    for target in (
+        "https://api.example.com/path",
+        "http://api.example.com:8443/x",
+        "api.example.com",
+        "api.example.com:443",
+    ):
+        assert gate.decide("http.fetch", {"url": target}).allowed, target
+
+
+def test_forced_network_with_no_target_uses_default(tmp_path):
+    # A tool that reaches the network but exposes no URL argument: guard(network=True).
+    deny = Interceptor(net_policy())
+    assert deny.engine.check("http.fetch", network=True).denied
+    allow = Interceptor(net_policy(allow_default=True))
+    assert allow.engine.check("http.fetch", network=True).allowed
+
+
+def test_network_host_rules_are_deterministic():
+    gate = Interceptor(net_policy(allow_hosts=["example.com"]))
+    call = {"url": "https://attacker.example"}
+    outcomes = {gate.decide("http.fetch", call).allowed for _ in range(50)}
+    assert outcomes == {False}
+
+
 def test_decide_checks_every_entry_of_a_list_argument(tmp_path):
     ws = tmp_path / "ws"
     ws.mkdir()

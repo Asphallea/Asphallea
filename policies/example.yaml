@@ -41,10 +41,19 @@ filesystem:
   write:
     - ./workspace/out
 
-# Deny all network by default. The containment tier blocks outbound sockets; the
-# policy tier denies any tool marked as network-using.
+# Deny network by default, then allow specific hosts. A tool-call's declared
+# network argument (see search's `network: url` above) is checked against these
+# rules: the host must match an allow entry or the call is denied. A host rule
+# also covers its subdomains, so `example.com` permits `api.example.com`. The OS
+# containment tier remains all-or-nothing for subprocesses; host rules govern the
+# declared network arguments of tool-calls.
 network:
   default: deny
+  allow_hosts:
+    - api.search.example.com
+  # deny_hosts wins even when the default is allow.
+  # deny_hosts:
+  #   - metadata.google.internal
 
 limits:
   # Wall-clock ceiling for a single tool call, in seconds.

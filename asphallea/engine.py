@@ -79,6 +79,7 @@ class Engine:
         *,
         reads: Sequence[str] = (),
         writes: Sequence[str] = (),
+        network_targets: Sequence[str] = (),
         network: bool = False,
         now: Optional[float] = None,
     ) -> Decision:
@@ -90,8 +91,11 @@ class Engine:
                 policy read allowlist.
             writes: Filesystem paths this call will write. Checked against the
                 policy write allowlist.
-            network: Whether this call uses the network. Denied when the policy
-                denies network.
+            network_targets: Network destinations this call will reach (URLs or
+                hosts). Each is checked against the policy host rules.
+            network: Force this call to count as network-using with an unknown
+                host, decided by the policy default. Use when a tool reaches the
+                network but exposes no target argument.
             now: Monotonic timestamp override for rate-window tests.
 
         The call's counters advance only if the decision is allow. The method is
@@ -123,11 +127,18 @@ class Engine:
                         f"write path {path!r} is not under an allowed write prefix",
                     )
 
-            # 4. network
-            if network and policy.network == "deny":
-                return Decision.deny(
-                    "network", f"tool {tool!r} uses the network but network is denied"
-                )
+            # 4. network: each declared target is checked against the host rules;
+            # a forced network flag with no target is decided by the default.
+            targets = list(network_targets)
+            if network and not targets:
+                targets = [None]
+            for target in targets:
+                if not policy.network_allowed(target):
+                    if target is None:
+                        reason = f"tool {tool!r} uses the network but network is denied"
+                    else:
+                        reason = f"network target {target!r} is not allowed by the host rules"
+                    return Decision.deny("network", reason)
 
             # 5. per-tool max calls
             if tool in policy.max_calls:

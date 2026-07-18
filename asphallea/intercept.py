@@ -122,13 +122,14 @@ class Interceptor:
 
         read_values = _values_for(args, read_names)
         write_values = _values_for(args, write_names)
-        uses_network = bool(network) or bool(_values_for(args, declared.network))
+        network_values = _values_for(args, declared.network)
 
         decision = self.engine.check(
             tool,
             reads=read_values,
             writes=write_values,
-            network=uses_network,
+            network_targets=network_values,
+            network=bool(network),
         )
         self.record(tool, decision, args)
         return decision
