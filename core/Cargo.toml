@@ -5,7 +5,7 @@ edition = "2021"
 rust-version = "1.74"
 description = "OS-level containment launcher for Asphallea. Applies Landlock, seccomp-bpf, resource limits, and network isolation, then execs the sandboxed command."
 license = "Apache-2.0"
-repository = "https://github.com/asphallea/asphallea"
+repository = "https://github.com/Asphallea/Asphallea"
 readme = "README.md"
 
 # The launcher is a single binary invoked by the Python SDK. It sets up the
