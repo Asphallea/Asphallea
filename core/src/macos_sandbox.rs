@@ -146,26 +146,30 @@ fn build_profile(policy: &Policy, extra_writes: &[&str]) -> String {
     // allowlists below.
     p.push_str("(allow file-read-data file-write-data (require-not (subpath \"/\")))\n");
 
-    // file-map-executable is required (macOS 11+) to mmap dylibs and the dyld
-    // shared cache with exec permission. Without it, dyld aborts the process
-    // (SIGABRT) before it runs, under deny-default. So system paths grant it.
+    // file-map-executable (macOS 11+) governs mmap(PROT_EXEC). dyld needs it to map
+    // the shared cache and dylibs, but the cache lives in an OS cryptex whose vnode
+    // path Seatbelt does not match by any name we can write, so a subpath rule never
+    // grants it and the process aborts (SIGABRT) on load. Allow it unrestricted: it
+    // only permits mapping already-open files as executable, and opening is still
+    // gated by the file-read* allowlist below, so data outside the policy paths stays
+    // unreadable (you cannot map what you cannot open).
+    p.push_str("(allow file-map-executable)\n");
+
     for base in SYSTEM_READ {
         p.push_str(&format!(
-            "(allow file-read* file-map-executable (subpath {}))\n",
+            "(allow file-read* (subpath {}))\n",
             sbpl_string(base)
         ));
     }
-    // Read paths also grant map-executable so a permitted interpreter or binary in
-    // the workspace can be run.
     for path in &policy.filesystem.read {
         p.push_str(&format!(
-            "(allow file-read* file-map-executable (subpath {}))\n",
+            "(allow file-read* (subpath {}))\n",
             sbpl_string(path)
         ));
     }
     for path in &policy.filesystem.write {
         p.push_str(&format!(
-            "(allow file-read* file-write* file-map-executable (subpath {}))\n",
+            "(allow file-read* file-write* (subpath {}))\n",
             sbpl_string(path)
         ));
     }

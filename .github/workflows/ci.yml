@@ -145,9 +145,14 @@ jobs:
           WS="$RUNNER_TEMP/dbg_ws"; mkdir -p "$WS"; echo "HELLO-SEATBELT" > "$WS/f.txt"
           IO='(allow file-read-data file-write-data (require-not (subpath "/")))(allow file-read* file-write* (subpath "/dev"))(allow file-ioctl)'
           BASE="(version 1)(deny default)(allow process*)(allow mach*)(allow sysctl-read)(allow signal)(allow file-read-metadata)$IO"
-          READMAP='(allow file-read* file-map-executable (subpath "'"$WS"'") (subpath "/usr") (subpath "/System") (subpath "/System/Volumes/Preboot/Cryptexes") (subpath "/bin") (subpath "/private/var/db"))'
-          echo "== confirm: restricted read+map + Cryptexes should print HELLO-SEATBELT =="
-          sandbox-exec -p "$BASE$READMAP" /bin/cat "$WS/f.txt"; echo "exit=$?"
+          READ='(allow file-read* (subpath "'"$WS"'") (subpath "/usr") (subpath "/System") (subpath "/bin") (subpath "/private/var/db"))'
+          echo "== D. read restricted, map UNRESTRICTED (the source approach) =="
+          sandbox-exec -p "$BASE$READ(allow file-map-executable)" /bin/cat "$WS/f.txt"; echo "exit=$?"
+          echo "== D2. confirm the secret is still unreadable under D =="
+          echo "TOPSECRET" > "$RUNNER_TEMP/secret.txt"
+          sandbox-exec -p "$BASE$READ(allow file-map-executable)" /bin/cat "$RUNNER_TEMP/secret.txt"; echo "exit=$? (want non-zero)"
+          echo "== F. if D failed, dyld verbose to name the remaining denial =="
+          DYLD_PRINT_LIBRARIES=1 DYLD_PRINT_WARNINGS=1 sandbox-exec -p "$BASE$READ(allow file-map-executable)" /bin/cat "$WS/f.txt" 2>&1 | tail -6; echo "exit=${PIPESTATUS[0]}"
       - name: run tests with Seatbelt containment
         env:
           ASPHALLEA_CORE_BIN: ${{ github.workspace }}/core/target/release/asphallea-run
