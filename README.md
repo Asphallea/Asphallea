@@ -58,18 +58,14 @@ denies network. This is the part a pure-ML competitor cannot replicate.
 ## Install
 
 ```sh
-pip install asphallea
+pip install git+https://github.com/Asphallea/Asphallea.git
 ```
 
-The release wheels are platform specific and bundle a prebuilt, code-signed
-`asphallea-run` core binary, so there is no Rust toolchain to install and nothing to
-compile. Before it runs that binary, the SDK verifies its SHA-256 against a manifest
-shipped inside the wheel and refuses a binary that does not match, so a swapped or
-patched core is rejected and the run fails closed. See
-[`SECURITY.md`](SECURITY.md) for the trust model.
+Installing directly from git builds a pure Python package with no Rust toolchain required. The **policy tier** works immediately on Linux, macOS, and Windows.
 
-To build the core yourself instead, see [`core/`](core) and point the SDK at your
-binary with `ASPHALLEA_CORE_BIN`.
+To enable the **containment tier** for shell execution and code sandboxing when installing from git, download the standalone core binary for your platform from the [releases page](https://github.com/Asphallea/Asphallea/releases) or build it yourself (see [`core/`](core)) and point the SDK at it with `ASPHALLEA_CORE_BIN`.
+
+Prebuilt **release wheels** (available on the [releases page](https://github.com/Asphallea/Asphallea/releases); PyPI registration pending) bundle the precompiled, code-signed `asphallea-run` core binary directly inside the wheel. When using a release wheel, the SDK verifies the binary's SHA-256 hash against a bundled manifest before invocation to prevent tampering. See [`SECURITY.md`](SECURITY.md) for the trust model.
 
 ## Quickstart
 
@@ -130,7 +126,9 @@ The policy tier gates whether a tool runs. For tools that run shell commands or
 execute code, the containment tier contains what they then do, at the OS level, on
 Linux, Windows, and macOS.
 
-Build the Rust core once (or install a release wheel, which bundles it):
+If you installed a release wheel the core is already bundled, so skip this. Otherwise
+download the standalone binary from the
+[releases page](https://github.com/Asphallea/Asphallea/releases), or build it:
 
 ```sh
 cd core
