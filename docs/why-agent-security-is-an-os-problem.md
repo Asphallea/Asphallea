@@ -1,7 +1,5 @@
 # Why agent security is an OS problem
 
-A launch essay stub. Founder voice. Draft.
-
 ## The short version
 
 An AI agent is a new kind of privileged process. We gave it credentials, a shell,
@@ -80,6 +78,71 @@ controls for years. The work is to wire them to the place where an agent actuall
 acts, which is the tool-execution boundary, and to make that wiring take five
 minutes for a developer to adopt.
 
+## We are not the first people to notice this
+
+We would rather name the prior art than have you find it. Two projects are doing
+serious work adjacent to this, and if you are evaluating Asphallea you should
+evaluate them too.
+
+**Anthropic's sandbox runtime** (`srt`) enforces filesystem and network
+restrictions on arbitrary processes at the OS level with no container, using
+`sandbox-exec` on macOS and `bubblewrap` on Linux plus a filtering proxy for the
+network. It is the cleanest expression of the OS-primitives argument this essay
+makes, it is open source, and it comes from the team that ships the most widely
+used coding agent. If what you need is to wrap one process, or to jail a local MCP
+server so it cannot read outside your project, use it. It is good, and the fact
+that it exists is the strongest evidence we have that this framing is right.
+
+**agentjail** puts a policy check in front of the tool calls of three specific
+coding agents, Claude Code, Codex, and Cursor, with Landlock and Seatbelt behind it
+and cost budgets on top. If you want a guardrail around a coding CLI you already
+use, install it, and you are done in a minute.
+
+Here is the seam neither of them covers, and it is the one we build for.
+
+Both tools secure an agent that somebody else built. `srt` wraps a process: it
+knows a command was run and which files that command touched, but it does not know
+what a *tool call* is, so it cannot allow `filesystem.read` and deny
+`filesystem.delete` when both are the same server. agentjail knows what a tool call
+is, but it knows it for three named CLIs.
+
+Asphallea is for the agent *you* are building. It is a library you put at your own
+tool-execution boundary, so the decision happens before the call leaves your
+process, on the call's own terms: this tool, these arguments, this argument is a
+read path and that one is a write path, denied because of this rule. The same
+decision point governs an MCP session and a LangChain tool, and the same JSONL line
+records both. Then, for the tool calls that spawn shells or execute code, the OS
+containment closes underneath.
+
+Policy at the tool-call boundary, containment underneath it, one audit trail across
+both. That is the layer we did not find, so we wrote it.
+
+## Be honest about where it holds
+
+Real containment is not free and it is not uniform. Each operating system has its
+own engine, they do not cover the same ground, and pretending otherwise would make
+this whole essay worthless.
+
+The policy tier is identical everywhere. Tool allowlist, path allowlists, rate
+limits, spend caps, timeouts, and the audit trail behave the same on Linux, macOS,
+and Windows, because they are our code and they are deterministic.
+
+The containment tier is where the platform matters. Linux contains with Landlock
+for the filesystem allowlist, seccomp-bpf for syscall and network-family filtering,
+network namespaces, and setrlimit, applied to the process and everything it spawns.
+Windows contains with an AppContainer for the filesystem allowlist and network deny,
+inside a Job Object that bounds memory, CPU, and process count and guarantees the
+whole process tree dies. macOS contains with a Seatbelt profile that allowlists the
+filesystem and denies the network; resource limits there are still to come.
+
+So the coverage is real on all three, and it is not equal. Syscall filtering is
+Linux only. Resource limits are not on macOS yet. We report what the running system
+can actually enforce, per dimension, and when a policy asks for something the local
+backend cannot deliver, the run fails closed instead of proceeding half contained.
+
+An honest "degraded on this platform" is worth more than a green checkmark you
+cannot back up. Credibility is the product too.
+
 ## Enforce first. Learn later
 
 There is a tempting version of this product that watches the agent, learns what
@@ -91,24 +154,10 @@ policy. It enforces that policy on every action, allow or deny, with a full log.
 learning, no scoring, no probability. Enforce mode is the foundation. Everything
 smarter is built on top of a floor that already holds.
 
-## Be honest about where it holds
-
-Real containment is not free and it is not uniform. Landlock needs a recent Linux
-kernel. seccomp is Linux. Network namespaces need specific support. On macOS and
-Windows the policy tier still enforces the tool allowlist, the path allowlist, the
-rate and spend limits, and the timeouts, but the OS-level containment of spawned
-processes is not there.
-
-So we say so. Asphallea detects what the running kernel can actually enforce and
-tells you. When it cannot contain, it refuses to pretend, and by default it fails
-closed rather than run a dangerous command exposed. An honest "degraded on this
-platform" is worth more than a green checkmark you cannot back up. Credibility is
-the product too.
-
 ## Where this goes
 
 v0 is enforce mode: a least-privilege policy and an audit trail around agent
-tool-execution, with real OS containment on Linux for the tools that can do the most
+tool-execution, with OS containment underneath the tools that can do the most
 damage. That is the floor. It is useful on its own, and it is the honest foundation
 for everything after it.
 
