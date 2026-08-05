@@ -20,6 +20,10 @@ tried.
 ![Containment](https://img.shields.io/badge/OS%20containment-Linux%20|%20Windows%20|%20macOS-B87333)
 ![MCP](https://img.shields.io/badge/integrations-MCP%20|%20LangChain-1E2328)
 
+<p align="center">
+  <img src="media/demo.gif" alt="A prompt-injected agent, contained" width="860">
+</p>
+
 ## The problem
 
 An AI agent that runs code, calls tools, browses, and touches APIs is a new kind of
