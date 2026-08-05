@@ -71,10 +71,22 @@ jobs:
           python -m pip install --upgrade build
           python -m build --wheel
 
+      - name: Stage standalone core binary for release assets
+        shell: bash
+        run: |
+          mkdir -p dist
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            cp core/target/release/asphallea-run.exe dist/asphallea-run-windows-x86_64.exe
+          elif [ "${{ runner.os }}" = "macOS" ]; then
+            cp core/target/release/asphallea-run dist/asphallea-run-macos-universal
+          else
+            cp core/target/release/asphallea-run dist/asphallea-run-linux-x86_64
+          fi
+
       - uses: actions/upload-artifact@v4
         with:
-          name: wheel-${{ matrix.os }}
-          path: dist/*.whl
+          name: artifacts-${{ matrix.os }}
+          path: dist/*
 
   sdist:
     name: sdist
@@ -91,10 +103,29 @@ jobs:
           name: sdist
           path: dist/*.tar.gz
 
+  github-release:
+    name: Create GitHub Release
+    needs: [build-wheels, sdist]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: dist/*
+          generate_release_notes: true
+
   publish:
     name: publish to PyPI
     needs: [build-wheels, sdist]
     runs-on: ubuntu-latest
+    continue-on-error: true
     # PyPI Trusted Publishing (OIDC): configure the publisher on PyPI, no token.
     permissions:
       id-token: write
@@ -103,6 +134,12 @@ jobs:
         with:
           path: dist
           merge-multiple: true
+      - name: Filter wheels and sdist for PyPI
+        run: |
+          mkdir -p pypi_dist
+          cp dist/*.whl pypi_dist/ 2>/dev/null || true
+          cp dist/*.tar.gz pypi_dist/ 2>/dev/null || true
       - uses: pypa/gh-action-pypi-publish@release/v1
         with:
-          packages-dir: dist
+          packages-dir: pypi_dist
+
