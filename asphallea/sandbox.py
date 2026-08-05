@@ -147,8 +147,12 @@ class Capabilities:
             if self.core_binary is None:
                 return (
                     f"the {CORE_BINARY_NAME} core binary was not found for "
-                    f"{self.platform}. Build it in core/ (cargo build --release) and "
-                    "put it on PATH or set ASPHALLEA_CORE_BIN."
+                    f"{self.platform}. Install a release wheel, which bundles a "
+                    "prebuilt core, or download the standalone binary for your "
+                    "platform from "
+                    "https://github.com/Asphallea/Asphallea/releases and point "
+                    "ASPHALLEA_CORE_BIN at it, or build it yourself in core/ "
+                    "(cargo build --release) and put it on PATH."
                 )
             return f"no OS containment engine is available on {self.platform}."
         return f"{self.backend} on {self.platform} contains: {self.dimensions()}."
