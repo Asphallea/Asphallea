@@ -1,6 +1,8 @@
 [package]
 name = "asphallea-core"
-version = "0.0.1"
+# Kept in lockstep with the Python package version (asphallea/__init__.py) so a
+# core binary's version always identifies the release that shipped it.
+version = "0.1.0"
 edition = "2021"
 rust-version = "1.74"
 description = "OS-level containment launcher for Asphallea. Applies Landlock, seccomp-bpf, resource limits, and network isolation, then execs the sandboxed command."

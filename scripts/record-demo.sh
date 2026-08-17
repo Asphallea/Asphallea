@@ -15,22 +15,22 @@
 
 set -uo pipefail
 
-VERSION="v0.0.1"
+VERSION="0.1.0"
 BASE="https://github.com/Asphallea/Asphallea"
 WORK="${ASPHALLEA_DEMO_DIR:-$HOME/.asphallea-demo}"
 REPO="$WORK/repo"
 VENV="$WORK/venv"
 
+# The wheel filename carries a platform tag that differs per host and changes
+# between releases, so let pip pick the right one rather than hardcoding it.
 wheel_name() {
-  case "$(uname -s)" in
-    Linux)  echo "asphallea-0.0.1-py3-none-linux_x86_64.whl" ;;
-    Darwin) echo "asphallea-0.0.1-py3-none-macosx_10_9_universal2.whl" ;;
-    *) echo "unsupported platform: $(uname -s). Record on Linux or macOS." >&2; exit 1 ;;
-  esac
+  local found
+  found="$(ls "$WORK"/asphallea-*.whl 2>/dev/null | head -1)" || true
+  [ -n "$found" ] || { echo "no downloaded wheel in $WORK; run 'prepare' first" >&2; exit 1; }
+  basename "$found"
 }
 
 prepare() {
-  local whl; whl="$(wheel_name)"
   echo "== preparing in $WORK =="
   mkdir -p "$WORK"
 
@@ -53,9 +53,12 @@ prepare() {
   echo "-- pre-satisfying dependencies (so the recorded install is instant)"
   "$VENV/bin/pip" install -q "pyyaml>=6.0"
 
-  echo "-- downloading the release wheel: $whl"
-  curl -fsSL -o "$WORK/$whl" "$BASE/releases/download/$VERSION/$whl" || {
-    echo "   wheel download FAILED. Check $BASE/releases/tag/$VERSION" >&2; exit 1; }
+  echo "-- downloading the release wheel for this platform"
+  rm -f "$WORK"/asphallea-*.whl
+  "$VENV/bin/pip" download -q --no-deps --only-binary :all: -d "$WORK" "asphallea==$VERSION" || {
+    echo "   wheel download FAILED. Is asphallea==$VERSION published for $(uname -s)?" >&2
+    echo "   See https://pypi.org/project/asphallea/$VERSION/#files" >&2; exit 1; }
+  local whl; whl="$(wheel_name)"
   echo "   $(du -h "$WORK/$whl" | cut -f1)  $whl"
 
   # Sanity: make sure the recorded run will actually work, in a throwaway venv

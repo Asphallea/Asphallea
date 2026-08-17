@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="media/asphallea-logo.jpeg" alt="Asphallea" width="380">
+  <img src="https://raw.githubusercontent.com/Asphallea/Asphallea/main/media/asphallea-logo.jpeg" alt="Asphallea" width="380">
 </p>
 
 <h1 align="center">Asphallea</h1>
@@ -21,7 +21,7 @@ tried.
 ![MCP](https://img.shields.io/badge/integrations-MCP%20|%20LangChain-1E2328)
 
 <p align="center">
-  <img src="media/demo.gif" alt="A prompt-injected agent, contained" width="860">
+  <img src="https://raw.githubusercontent.com/Asphallea/Asphallea/main/media/demo.gif" alt="A prompt-injected agent, contained" width="860">
 </p>
 
 ## The problem
@@ -61,51 +61,41 @@ denies network. This is the part a pure-ML competitor cannot replicate.
 
 ## Install
 
-Asphallea is not on PyPI yet. Install from the repository:
-
 ```sh
-pip install git+https://github.com/Asphallea/Asphallea.git
+pip install asphallea
 ```
 
-That gives you the whole policy tier: interception, deterministic allow/deny, rate
-and spend limits, and the JSONL audit trail, behaving identically on Linux, macOS,
-and Windows. It is a pure-Python install with no Rust toolchain and nothing to
-compile.
+On a platform with a published wheel, that is the whole product: the policy tier
+*and* the `asphallea-run` core binary that enforces OS containment, with nothing to
+compile and no Rust toolchain. The wheels are platform specific and each bundles the
+prebuilt core together with a `_core/checksums.json` manifest. Before the SDK runs
+that binary it recomputes the SHA-256 and refuses one that does not match, so a
+swapped or patched core is rejected and the run fails closed.
 
-It does not include the `asphallea-run` core binary, so the containment tier is
+Wheels are published for:
+
+| Platform | Wheel | Containment backend |
+| --- | --- | --- |
+| Linux x86_64 (glibc and musl) | `manylinux_2_17`, `musllinux_1_2` | Landlock + seccomp-bpf |
+| macOS 11+ (Apple Silicon and Intel) | `macosx_11_0_universal2` | Seatbelt (`sandbox-exec`) |
+| Windows x86_64 | `win_amd64` | AppContainer + Job Object |
+
+Anywhere else — Linux aarch64, or any platform without a wheel — pip falls back to
+the source distribution. That is a pure-Python install: the full policy tier
+(interception, deterministic allow/deny, rate and spend limits, the JSONL audit
+trail) works identically, but there is no core binary, so the containment tier is
 unavailable until you supply one. In that state `sandbox.run` fails closed: it
 refuses the command and tells you what is missing, rather than running it
-uncontained.
+uncontained. `asphallea.capabilities().explain()` tells you which state you are in.
 
-### Adding the containment tier
+### Supplying a core binary yourself
 
-Two ways, and they differ in who verifies the binary.
-
-**Install a release wheel (the core is verified for you).** The wheels attached to
-each release are platform
-specific and bundle a prebuilt `asphallea-run` together with a
-`_core/checksums.json` manifest. Before the SDK runs that binary it recomputes the
-SHA-256 and refuses a binary that does not match, so a swapped or patched core is
-rejected and the run fails closed. This is the only path where that check has
-something to check against.
-
-```sh
-# Linux x86_64
-pip install https://github.com/Asphallea/Asphallea/releases/download/v0.0.1/asphallea-0.0.1-py3-none-linux_x86_64.whl
-
-# macOS (universal2)
-pip install https://github.com/Asphallea/Asphallea/releases/download/v0.0.1/asphallea-0.0.1-py3-none-macosx_10_9_universal2.whl
-
-# Windows x86_64
-pip install https://github.com/Asphallea/Asphallea/releases/download/v0.0.1/asphallea-0.0.1-py3-none-win_amd64.whl
-```
-
-**Or point the SDK at a core binary yourself.** Every release also publishes the
-standalone binary. Download the one for your platform and set `ASPHALLEA_CORE_BIN`:
+Every release also publishes the standalone binary. Download the one for your
+platform and set `ASPHALLEA_CORE_BIN`:
 
 ```sh
 curl -L -o asphallea-run \
-  https://github.com/Asphallea/Asphallea/releases/download/v0.0.1/asphallea-run-linux-x86_64
+  https://github.com/Asphallea/Asphallea/releases/latest/download/asphallea-run-linux-x86_64
 chmod +x asphallea-run
 export ASPHALLEA_CORE_BIN="$PWD/asphallea-run"
 ```
@@ -116,8 +106,8 @@ than implying it verified something. If that matters to you, check the binary's
 SHA-256 against the digest published on the release page yourself. Release binaries
 are code-signed on Windows and macOS when signing certificates are configured.
 
-To build the core from source, see [`core/`](core). The trust model is in
-[`SECURITY.md`](SECURITY.md).
+To build the core from source, see [`core/`](https://github.com/Asphallea/Asphallea/blob/main/core). The trust model is in
+[`SECURITY.md`](https://github.com/Asphallea/Asphallea/blob/main/SECURITY.md).
 
 ## Quickstart
 
@@ -166,7 +156,7 @@ def read_file(path: str) -> str:
 
 `@guard`, the MCP adapter, and `Interceptor.decide` all funnel through one decision
 point, so a decorated function and an MCP tool-call are decided and logged by the
-same code. The full quickstart is [`examples/quickstart.py`](examples/quickstart.py):
+same code. The full quickstart is [`examples/quickstart.py`](https://github.com/Asphallea/Asphallea/blob/main/examples/quickstart.py):
 
 ```sh
 python examples/quickstart.py
@@ -226,7 +216,7 @@ print(capabilities().explain())
 
 ## The demo
 
-[`examples/demo.py`](examples/demo.py) is the whole pitch in one file. An agent is
+[`examples/demo.py`](https://github.com/Asphallea/Asphallea/blob/main/examples/demo.py) is the whole pitch in one file. An agent is
 connected to a filesystem tool server over MCP and reads a page carrying an injected
 instruction that tells it to steal a credential and delete the production database.
 It runs twice: once unguarded, where the attack succeeds against throwaway temp
@@ -255,7 +245,7 @@ A policy declares, per policy:
 - OS resource limits for the containment tier
 
 Build it fluently or load it from YAML. See
-[`policies/example.yaml`](policies/example.yaml).
+[`policies/example.yaml`](https://github.com/Asphallea/Asphallea/blob/main/policies/example.yaml).
 
 ```python
 from asphallea import Policy
@@ -274,7 +264,7 @@ redaction hook scrubs likely secrets before anything is written.
 {"timestamp": "2026-07-12T18:20:01Z", "tier": "policy", "tool": "filesystem.delete", "decision": "deny", "rule": "write_paths", "reason": "write path '/etc/passwd' is not under an allowed write prefix", "policy": "agent", "args": [], "kwargs": {"path": "/etc/passwd"}}
 ```
 
-Swap in your own audit sink or redactor. See [`asphallea/audit.py`](asphallea/audit.py).
+Swap in your own audit sink or redactor. See [`asphallea/audit.py`](https://github.com/Asphallea/Asphallea/blob/main/asphallea/audit.py).
 
 ## MCP
 
@@ -352,11 +342,11 @@ run partially contained.
 
 ## Architecture
 
-The design and the decisions behind it are in [`PLAN.md`](PLAN.md). The short
+The design and the decisions behind it are in [`PLAN.md`](https://github.com/Asphallea/Asphallea/blob/main/PLAN.md). The short
 version: the Python SDK is the developer-facing surface, and the Rust
-[`core/`](core) crate is the OS enforcement, invoked as a launcher binary that
+[`core/`](https://github.com/Asphallea/Asphallea/blob/main/core) crate is the OS enforcement, invoked as a launcher binary that
 applies containment to itself and then execs the sandboxed command. The launch essay
-is in [`docs/why-agent-security-is-an-os-problem.md`](docs/why-agent-security-is-an-os-problem.md).
+is in [`docs/why-agent-security-is-an-os-problem.md`](https://github.com/Asphallea/Asphallea/blob/main/docs/why-agent-security-is-an-os-problem.md).
 
 ## What v0 is not
 
@@ -367,4 +357,4 @@ These are deliberate non-goals for v0.
 
 ## License
 
-Apache-2.0. See [`LICENSE`](LICENSE).
+Apache-2.0. See [`LICENSE`](https://github.com/Asphallea/Asphallea/blob/main/LICENSE).

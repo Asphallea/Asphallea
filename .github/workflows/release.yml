@@ -1,7 +1,8 @@
 name: release
 
 # Builds one platform wheel per OS, each bundling that OS's prebuilt core binary,
-# code-signs the binary when signing secrets are configured, and publishes to PyPI.
+# code-signs the binary when signing secrets are configured, verifies every wheel
+# actually carries a working core, and publishes to PyPI.
 # Trigger by pushing a version tag (v0.0.1) or manually.
 on:
   push:
@@ -10,11 +11,35 @@ on:
 
 jobs:
   build-wheels:
-    name: wheel (${{ matrix.os }})
+    name: wheel (${{ matrix.name }})
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        include:
+          # The Linux core is linked statically against musl so the wheel carries
+          # no libc dependency: it runs on any glibc distro (manylinux) and on
+          # Alpine (musllinux), and PyPI accepts both tags. A bare linux_x86_64
+          # wheel, which is what a plain native build produces, is rejected at
+          # upload.
+          - os: ubuntu-latest
+            name: linux-x86_64
+            rust_target: x86_64-unknown-linux-musl
+            wheel_platform: manylinux_2_17_x86_64
+            # Same binary, second tag, so Alpine hosts get a wheel too.
+            extra_wheel_platform: musllinux_1_2_x86_64
+            asset: asphallea-run-linux-x86_64
+          # One universal2 binary covers both Apple Silicon and Intel Macs, so a
+          # single wheel serves every supported Mac.
+          - os: macos-latest
+            name: macos-universal2
+            rust_target: universal2
+            wheel_platform: macosx_11_0_universal2
+            asset: asphallea-run-macos-universal
+          - os: windows-latest
+            name: windows-x86_64
+            rust_target: x86_64-pc-windows-msvc
+            wheel_platform: win_amd64
+            asset: asphallea-run-windows-x86_64.exe
     runs-on: ${{ matrix.os }}
     # Signing secrets. Empty when unset; the sign steps skip and the wheel ships
     # unsigned (still hash-verified). Configure these in the repo secrets to sign.
@@ -24,6 +49,7 @@ jobs:
       MACOS_CERT_P12_BASE64: ${{ secrets.MACOS_CERT_P12_BASE64 }}
       MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
       MACOS_SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
+      MACOSX_DEPLOYMENT_TARGET: "11.0"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -31,8 +57,35 @@ jobs:
           python-version: "3.11"
       - uses: dtolnay/rust-toolchain@stable
 
-      - name: Build the core (release)
-        run: cargo build --release --manifest-path core/Cargo.toml
+      - name: Build the core (Linux, static musl)
+        if: runner.os == 'Linux'
+        run: |
+          rustup target add ${{ matrix.rust_target }}
+          cargo build --release --target ${{ matrix.rust_target }} --manifest-path core/Cargo.toml
+          file core/target/${{ matrix.rust_target }}/release/asphallea-run
+          # A dynamically linked binary here would break the manylinux promise.
+          ldd core/target/${{ matrix.rust_target }}/release/asphallea-run 2>&1 | grep -q "statically linked\|not a dynamic executable"
+          echo "CORE_BIN=core/target/${{ matrix.rust_target }}/release/asphallea-run" >> "$GITHUB_ENV"
+
+      - name: Build the core (macOS, universal2)
+        if: runner.os == 'macOS'
+        run: |
+          rustup target add x86_64-apple-darwin aarch64-apple-darwin
+          cargo build --release --target x86_64-apple-darwin --manifest-path core/Cargo.toml
+          cargo build --release --target aarch64-apple-darwin --manifest-path core/Cargo.toml
+          mkdir -p core/target/universal
+          lipo -create -output core/target/universal/asphallea-run \
+            core/target/x86_64-apple-darwin/release/asphallea-run \
+            core/target/aarch64-apple-darwin/release/asphallea-run
+          lipo -info core/target/universal/asphallea-run
+          echo "CORE_BIN=core/target/universal/asphallea-run" >> "$GITHUB_ENV"
+
+      - name: Build the core (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          cargo build --release --manifest-path core/Cargo.toml
+          echo "CORE_BIN=core/target/release/asphallea-run.exe" >> "$GITHUB_ENV"
 
       - name: Sign the core (Windows Authenticode)
         if: runner.os == 'Windows' && env.WINDOWS_CERT_PFX_BASE64 != ''
@@ -42,7 +95,7 @@ jobs:
           [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:WINDOWS_CERT_PFX_BASE64))
           & signtool sign /f $pfx /p $env:WINDOWS_CERT_PASSWORD /fd sha256 `
             /tr http://timestamp.digicert.com /td sha256 `
-            core/target/release/asphallea-run.exe
+            $env:CORE_BIN
           Remove-Item $pfx
 
       - name: Sign the core (macOS codesign + notarize)
@@ -55,7 +108,7 @@ jobs:
           security import cert.p12 -k build.keychain -P "$MACOS_CERT_PASSWORD" -T /usr/bin/codesign
           security set-key-partition-list -S apple-tool:,apple: -s -k tmp build.keychain
           codesign --force --options runtime --timestamp \
-            --sign "$MACOS_SIGN_IDENTITY" core/target/release/asphallea-run
+            --sign "$MACOS_SIGN_IDENTITY" "$CORE_BIN"
           rm cert.p12
           # Notarization (notarytool) goes here once an Apple ID / API key is set.
 
@@ -64,28 +117,41 @@ jobs:
       # option in the publish step.
 
       - name: Bundle the signed core into the package
-        run: python scripts/bundle_core.py
+        shell: bash
+        run: python scripts/bundle_core.py --binary "$CORE_BIN"
 
       - name: Build the wheel
+        shell: bash
+        env:
+          ASPHALLEA_WHEEL_PLATFORM: ${{ matrix.wheel_platform }}
         run: |
           python -m pip install --upgrade build
+          # --wheel builds from the source tree. A default `build` run would build
+          # the wheel from the sdist, which carries no core binary.
           python -m build --wheel
+
+      - name: Build the musllinux wheel from the same binary
+        if: matrix.extra_wheel_platform != ''
+        shell: bash
+        env:
+          ASPHALLEA_WHEEL_PLATFORM: ${{ matrix.extra_wheel_platform }}
+        run: python -m build --wheel
+
+      # The gate: every wheel must contain a core binary whose hash matches the
+      # bundled manifest, and must install and report real OS containment. A wheel
+      # that lost its binary still imports and still passes the policy tier, so
+      # nothing else would catch it.
+      - name: Verify the wheels ship a working core
+        shell: bash
+        run: python scripts/verify_wheel.py --live dist/*.whl
 
       - name: Stage standalone core binary for release assets
         shell: bash
-        run: |
-          mkdir -p dist
-          if [ "${{ runner.os }}" = "Windows" ]; then
-            cp core/target/release/asphallea-run.exe dist/asphallea-run-windows-x86_64.exe
-          elif [ "${{ runner.os }}" = "macOS" ]; then
-            cp core/target/release/asphallea-run dist/asphallea-run-macos-universal
-          else
-            cp core/target/release/asphallea-run dist/asphallea-run-linux-x86_64
-          fi
+        run: cp "$CORE_BIN" "dist/${{ matrix.asset }}"
 
       - uses: actions/upload-artifact@v4
         with:
-          name: artifacts-${{ matrix.os }}
+          name: artifacts-${{ matrix.name }}
           path: dist/*
 
   sdist:
@@ -125,21 +191,48 @@ jobs:
     name: publish to PyPI
     needs: [build-wheels, sdist]
     runs-on: ubuntu-latest
-    continue-on-error: true
-    # PyPI Trusted Publishing (OIDC): configure the publisher on PyPI, no token.
+    # PyPI Trusted Publishing (OIDC) when no token secret is set; otherwise the
+    # PYPI_API_TOKEN secret. This job must not be continue-on-error: a silent
+    # publish failure ships a green release with nothing on PyPI.
     permissions:
       id-token: write
+    env:
+      HAS_TOKEN: ${{ secrets.PYPI_API_TOKEN != '' }}
     steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
       - uses: actions/download-artifact@v4
         with:
           path: dist
           merge-multiple: true
-      - name: Filter wheels and sdist for PyPI
+
+      - name: Collect the distributions PyPI accepts
         run: |
           mkdir -p pypi_dist
           cp dist/*.whl pypi_dist/ 2>/dev/null || true
           cp dist/*.tar.gz pypi_dist/ 2>/dev/null || true
-      - uses: pypa/gh-action-pypi-publish@release/v1
+          ls -la pypi_dist
+
+      # Re-check here too: this is the last point before the artifacts become
+      # permanent and un-replaceable on PyPI.
+      - name: Verify every wheel before upload
+        run: python scripts/verify_wheel.py pypi_dist/*.whl
+
+      - name: Publish (API token)
+        if: env.HAS_TOKEN == 'true'
+        uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: pypi_dist
+          password: ${{ secrets.PYPI_API_TOKEN }}
+          # Wheels already uploaded (for example by an earlier partial release)
+          # must not fail the rest of the upload.
+          skip-existing: true
 
+      - name: Publish (Trusted Publishing)
+        if: env.HAS_TOKEN != 'true'
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: pypi_dist
+          skip-existing: true
