@@ -62,6 +62,32 @@ def test_platform_tag_is_abi_agnostic_and_platform_specific():
     assert " " not in tag
 
 
+def test_platform_tag_never_emits_a_bare_linux_tag(monkeypatch):
+    # PyPI rejects bare linux_* wheels; only manylinux/musllinux are uploadable.
+    monkeypatch.delenv(hatch_build.PLATFORM_ENV, raising=False)
+    for bare, expected in hatch_build._LINUX_TAGS.items():
+        monkeypatch.setattr(hatch_build.sysconfig, "get_platform", lambda b=bare: b.replace("_", "-", 1))
+        assert hatch_build.platform_tag() == f"py3-none-{expected}"
+
+
+def test_platform_tag_honours_the_release_override(monkeypatch):
+    monkeypatch.setenv(hatch_build.PLATFORM_ENV, "musllinux_1_2_x86_64")
+    assert hatch_build.platform_tag() == "py3-none-musllinux_1_2_x86_64"
+
+
+@needs_toml
+def test_version_is_single_sourced_from_the_package():
+    project = _pyproject()["project"]
+    assert "version" not in project, "version must not be pinned twice"
+    assert "version" in project["dynamic"]
+    assert _pyproject()["tool"]["hatch"]["version"]["path"] == "asphallea/__init__.py"
+
+
+def test_py_typed_marker_ships_with_the_package():
+    # Without this marker the annotations are invisible to consumers' type checkers.
+    assert (ROOT / "asphallea" / "py.typed").is_file()
+
+
 @needs_toml
 def test_project_metadata_is_well_formed():
     project = _pyproject()["project"]

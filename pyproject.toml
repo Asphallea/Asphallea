@@ -1,11 +1,15 @@
 # Asphallea Security Runtime
 [build-system]
-requires = ["hatchling>=1.18"]
+# 1.27 is the floor for PEP 639 license metadata (the `license` expression string
+# and the `license-files` array below). Older hatchling rejects both.
+requires = ["hatchling>=1.27"]
 build-backend = "hatchling.build"
 
 [project]
 name = "asphallea"
-version = "0.0.1"
+# Single-sourced from asphallea/__init__.py so a release cannot ship a wheel whose
+# metadata and __version__ disagree.
+dynamic = ["version"]
 description = "A security runtime that contains what your AI agent can do. Least-privilege sandboxing and a full audit trail for agent tool-execution."
 readme = "README.md"
 requires-python = ">=3.9"
@@ -31,8 +35,14 @@ classifiers = [
     "Operating System :: MacOS",
     "Operating System :: Microsoft :: Windows",
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Programming Language :: Rust",
     "Topic :: Security",
+    "Typing :: Typed",
 ]
 dependencies = [
     "PyYAML>=6.0",
@@ -49,6 +59,9 @@ dev = [
 Homepage = "https://github.com/Asphallea/Asphallea"
 Source = "https://github.com/Asphallea/Asphallea"
 Issues = "https://github.com/Asphallea/Asphallea/issues"
+
+[tool.hatch.version]
+path = "asphallea/__init__.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["asphallea"]
