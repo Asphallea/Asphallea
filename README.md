@@ -61,51 +61,41 @@ denies network. This is the part a pure-ML competitor cannot replicate.
 
 ## Install
 
-Asphallea is not on PyPI yet. Install from the repository:
-
 ```sh
-pip install git+https://github.com/Asphallea/Asphallea.git
+pip install asphallea
 ```
 
-That gives you the whole policy tier: interception, deterministic allow/deny, rate
-and spend limits, and the JSONL audit trail, behaving identically on Linux, macOS,
-and Windows. It is a pure-Python install with no Rust toolchain and nothing to
-compile.
+On a platform with a published wheel, that is the whole product: the policy tier
+*and* the `asphallea-run` core binary that enforces OS containment, with nothing to
+compile and no Rust toolchain. The wheels are platform specific and each bundles the
+prebuilt core together with a `_core/checksums.json` manifest. Before the SDK runs
+that binary it recomputes the SHA-256 and refuses one that does not match, so a
+swapped or patched core is rejected and the run fails closed.
 
-It does not include the `asphallea-run` core binary, so the containment tier is
+Wheels are published for:
+
+| Platform | Wheel | Containment backend |
+| --- | --- | --- |
+| Linux x86_64 (glibc and musl) | `manylinux_2_17`, `musllinux_1_2` | Landlock + seccomp-bpf |
+| macOS 11+ (Apple Silicon and Intel) | `macosx_11_0_universal2` | Seatbelt (`sandbox-exec`) |
+| Windows x86_64 | `win_amd64` | AppContainer + Job Object |
+
+Anywhere else — Linux aarch64, or any platform without a wheel — pip falls back to
+the source distribution. That is a pure-Python install: the full policy tier
+(interception, deterministic allow/deny, rate and spend limits, the JSONL audit
+trail) works identically, but there is no core binary, so the containment tier is
 unavailable until you supply one. In that state `sandbox.run` fails closed: it
 refuses the command and tells you what is missing, rather than running it
-uncontained.
+uncontained. `asphallea.capabilities().explain()` tells you which state you are in.
 
-### Adding the containment tier
+### Supplying a core binary yourself
 
-Two ways, and they differ in who verifies the binary.
-
-**Install a release wheel (the core is verified for you).** The wheels attached to
-each release are platform
-specific and bundle a prebuilt `asphallea-run` together with a
-`_core/checksums.json` manifest. Before the SDK runs that binary it recomputes the
-SHA-256 and refuses a binary that does not match, so a swapped or patched core is
-rejected and the run fails closed. This is the only path where that check has
-something to check against.
-
-```sh
-# Linux x86_64
-pip install https://github.com/Asphallea/Asphallea/releases/download/v0.0.1/asphallea-0.0.1-py3-none-linux_x86_64.whl
-
-# macOS (universal2)
-pip install https://github.com/Asphallea/Asphallea/releases/download/v0.0.1/asphallea-0.0.1-py3-none-macosx_10_9_universal2.whl
-
-# Windows x86_64
-pip install https://github.com/Asphallea/Asphallea/releases/download/v0.0.1/asphallea-0.0.1-py3-none-win_amd64.whl
-```
-
-**Or point the SDK at a core binary yourself.** Every release also publishes the
-standalone binary. Download the one for your platform and set `ASPHALLEA_CORE_BIN`:
+Every release also publishes the standalone binary. Download the one for your
+platform and set `ASPHALLEA_CORE_BIN`:
 
 ```sh
 curl -L -o asphallea-run \
-  https://github.com/Asphallea/Asphallea/releases/download/v0.0.1/asphallea-run-linux-x86_64
+  https://github.com/Asphallea/Asphallea/releases/latest/download/asphallea-run-linux-x86_64
 chmod +x asphallea-run
 export ASPHALLEA_CORE_BIN="$PWD/asphallea-run"
 ```

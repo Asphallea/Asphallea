@@ -51,7 +51,7 @@ from .integrity import IntegrityError, IntegrityResult, verify_core
 from .policy import Policy, PolicyBuilder, PolicyError, RateLimit, ResourceLimits, ToolArgs
 from .sandbox import Capabilities, ContainmentUnavailable, SandboxResult, capabilities
 
-__version__ = "0.0.1"
+__version__ = "0.1.0"
 
 __all__ = [
     "__version__",
