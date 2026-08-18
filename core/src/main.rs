@@ -183,9 +183,26 @@ fn main() {
         netns::apply(&mut report);
     }
 
-    // 4. filesystem allowlist.
-    landlock_fs::apply(&policy, &mut report);
-    if strict && report.landlock_status == "not_enforced" {
+    // 4. filesystem allowlist, only when the policy actually asked for one.
+    //
+    // Landlock is an allowlist, so activating it always restricts. A policy with no
+    // read or write prefixes has not requested filesystem containment, and applying
+    // Landlock anyway would deny everything outside the baseline system paths: the
+    // user's home directory, project files, virtualenvs. That is more restriction
+    // than the policy asked for, and it breaks network-only and resource-only
+    // policies for reasons the policy never mentions.
+    let filesystem_requested = policy.filesystem_restricted();
+    if filesystem_requested {
+        landlock_fs::apply(&policy, &mut report);
+    } else {
+        report.landlock_abi = landlock_fs::abi_version();
+        report.landlock_status = "not_requested".to_string();
+    }
+    // Fail closed on every state that is not actual enforcement, not just on one
+    // named failure. "unsupported" (a pre-5.13 kernel) is as much a failure to
+    // contain as "not_enforced", and an unrecognized future state must not be read
+    // as success.
+    if filesystem_requested && strict && !landlock_enforced(&report.landlock_status) {
         report.contained = false;
         flush_report(&mut report_file, &report);
         eprintln!(
@@ -207,9 +224,11 @@ fn main() {
         exit(3);
     }
 
-    report.contained = report.landlock_status != "not_enforced"
-        && report.landlock_status != "unsupported"
-        && report.seccomp_applied;
+    // Containment is judged against what the policy asked for. A network-only policy
+    // that got its seccomp filter is fully contained; it is not "uncontained" for
+    // lacking a filesystem restriction it never requested.
+    let filesystem_ok = !filesystem_requested || landlock_enforced(&report.landlock_status);
+    report.contained = filesystem_ok && report.seccomp_applied;
 
     // 6. write the report through the descriptor opened before Landlock, then exec.
     flush_report(&mut report_file, &report);
@@ -226,6 +245,16 @@ fn main() {
     let err = nix::unistd::execvp(&prog, &cargs).unwrap_err();
     eprintln!("asphallea-run: could not exec {}: {}", inv.command[0], err);
     exit(127);
+}
+
+/// Whether a Landlock status means the filesystem allowlist is actually in force.
+///
+/// Written as an allowlist of success states rather than a denylist of failures, so
+/// a status this function has never heard of counts as "not enforced" and fails
+/// closed under `--strict`.
+#[cfg(target_os = "linux")]
+fn landlock_enforced(status: &str) -> bool {
+    matches!(status, "fully_enforced" | "partially_enforced")
 }
 
 #[cfg(target_os = "linux")]
@@ -358,4 +387,32 @@ fn main() {
         std::env::consts::OS
     );
     std::process::exit(3);
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::landlock_enforced;
+
+    #[test]
+    fn only_real_enforcement_counts_as_enforced() {
+        assert!(landlock_enforced("fully_enforced"));
+        assert!(landlock_enforced("partially_enforced"));
+    }
+
+    #[test]
+    fn every_non_enforcing_state_fails_closed() {
+        // "unsupported" was missed by the 0.1.0 strict check, which compared against
+        // "not_enforced" alone and so ran the command on a pre-5.13 kernel.
+        assert!(!landlock_enforced("unsupported"));
+        assert!(!landlock_enforced("not_enforced"));
+        assert!(!landlock_enforced("not_requested"));
+    }
+
+    #[test]
+    fn unknown_states_fail_closed() {
+        // An allowlist, so a status added later is treated as unenforced until it is
+        // deliberately listed as success.
+        assert!(!landlock_enforced("some_future_state"));
+        assert!(!landlock_enforced(""));
+    }
 }

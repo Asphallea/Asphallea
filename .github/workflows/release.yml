@@ -145,6 +145,31 @@ jobs:
         shell: bash
         run: python scripts/verify_wheel.py --live dist/*.whl
 
+      # The suite normally runs against the source tree. Run it once more against
+      # the installed wheel, from outside the repo so the local package cannot
+      # satisfy the import, to catch "source works, wheel broken" failures: a
+      # missing bundled binary, a stale manifest, a file left out of the wheel.
+      - name: Run the containment suite against the installed wheel
+        shell: bash
+        run: |
+          python -m venv "$RUNNER_TEMP/wheelenv"
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            PY="$RUNNER_TEMP/wheelenv/Scripts/python"
+          else
+            PY="$RUNNER_TEMP/wheelenv/bin/python"
+          fi
+          "$PY" -m pip install --quiet pytest pyyaml
+          # Install the wheel for this platform; a second tag (musllinux) will not
+          # match the host and is covered by its own runner.
+          for whl in dist/*.whl; do
+            "$PY" -m pip install --quiet "$whl" 2>/dev/null && echo "installed $whl" && break
+          done
+          cp -r tests "$RUNNER_TEMP/wheel-tests"
+          cd "$RUNNER_TEMP"
+          "$PY" -m pytest wheel-tests -q \
+            --ignore=wheel-tests/test_packaging.py \
+            --ignore=wheel-tests/test_demo.py
+
       - name: Stage standalone core binary for release assets
         shell: bash
         run: cp "$CORE_BIN" "dist/${{ matrix.asset }}"
