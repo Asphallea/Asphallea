@@ -24,6 +24,10 @@ jobs:
             python-version: "3.9"
           - os: ubuntu-latest
             python-version: "3.13"
+          # Current distros already ship 3.14 (Kali does), so it is a real target,
+          # not a future one.
+          - os: ubuntu-latest
+            python-version: "3.14"
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4

@@ -20,7 +20,13 @@ pub struct Report {
     /// The OS name.
     pub platform: String,
     /// Landlock outcome: `fully_enforced`, `partially_enforced`, `not_enforced`,
-    /// or `unsupported`.
+    /// `unsupported`, or `not_requested`.
+    ///
+    /// `not_requested` means the policy declared no read or write prefixes, so no
+    /// filesystem restriction was asked for and none was applied. It is not a
+    /// failure: reporting `not_enforced` there would imply a control was attempted
+    /// and lost, and `unsupported` would imply the kernel lacked Landlock, when in
+    /// fact the kernel may support it perfectly and simply had nothing to enforce.
     pub landlock_status: String,
     /// The Landlock ABI version the kernel reported, or 0.
     pub landlock_abi: i64,

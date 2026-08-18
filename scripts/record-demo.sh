@@ -15,7 +15,7 @@
 
 set -uo pipefail
 
-VERSION="0.1.0"
+VERSION="0.1.1"
 BASE="https://github.com/Asphallea/Asphallea"
 WORK="${ASPHALLEA_DEMO_DIR:-$HOME/.asphallea-demo}"
 REPO="$WORK/repo"
